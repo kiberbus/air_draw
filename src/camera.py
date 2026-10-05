@@ -1,6 +1,6 @@
 """
-Модуль фонового захвата видео с веб-камеры с поддержкой ограничения FPS
-и изменения разрешения.
+Background webcam capture with an optional FPS limit and runtime
+resolution changes.
 """
 
 from __future__ import annotations
@@ -18,8 +18,10 @@ logger = logging.getLogger("air_draw.camera")
 
 class ThreadedCamera:
     """
-    Фоновый захват кадров с веб-камеры.
-    Параллельный поток предотвращает задержки основного интерфейса и MediaPipe.
+    Grabs webcam frames on a background thread.
+
+    Reading from the camera in a separate thread keeps blocking I/O away from
+    the UI and MediaPipe processing; consumers always get the latest frame.
     """
 
     def __init__(
@@ -47,10 +49,11 @@ class ThreadedCamera:
         self._start_camera()
 
     def _start_camera(self) -> None:
+        """Open the capture device and start the reader thread."""
         try:
             self.cap = cv2.VideoCapture(self.camera_index)
             if not self.cap.isOpened():
-                logger.warning(f"Не удалось открыть камеру {self.camera_index}, пробуем камеру 0")
+                logger.warning(f"Could not open camera {self.camera_index}, falling back to camera 0")
                 self.cap = cv2.VideoCapture(0)
 
             if self.requested_width:
@@ -58,6 +61,7 @@ class ThreadedCamera:
             if self.requested_height:
                 self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.requested_height)
 
+            # The driver may not support the requested size — use what it actually gives us
             actual_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             actual_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             self.width = actual_w if actual_w > 0 else (self.requested_width or 640)
@@ -66,11 +70,12 @@ class ThreadedCamera:
             self._running = True
             self._thread = threading.Thread(target=self._loop, daemon=True)
             self._thread.start()
-            logger.info(f"Камера запущена: {self.width}x{self.height}, лимит FPS: {self.fps_limit}")
+            logger.info(f"Camera started: {self.width}x{self.height}, FPS limit: {self.fps_limit}")
         except Exception as e:
-            logger.error(f"Ошибка запуска камеры: {e}")
+            logger.error(f"Failed to start camera: {e}")
 
     def _loop(self) -> None:
+        """Reader thread: continuously grab frames into the shared buffer."""
         while self._running:
             start_t = time.time()
             if self.cap is not None and self.cap.isOpened():
@@ -83,7 +88,7 @@ class ThreadedCamera:
             else:
                 time.sleep(0.05)
 
-            # Ограничение FPS при необходимости
+            # Throttle to the FPS limit (0 means unlimited)
             if self.fps_limit > 0:
                 frame_budget = 1.0 / self.fps_limit
                 elapsed = time.time() - start_t
@@ -91,6 +96,7 @@ class ThreadedCamera:
                     time.sleep(frame_budget - elapsed)
 
     def read(self) -> Tuple[bool, Optional[np.ndarray]]:
+        """Return ``(ok, frame)`` with a copy of the most recent frame."""
         with self._lock:
             if self._frame is None:
                 return False, None
@@ -106,6 +112,7 @@ class ThreadedCamera:
         height: Optional[int],
         fps_limit: int,
     ) -> None:
+        """Apply new settings, reopening the device only when necessary."""
         need_reopen = (camera_index != self.camera_index) or (width != self.requested_width) or (height != self.requested_height)
         self.fps_limit = fps_limit
         if need_reopen:
@@ -116,6 +123,7 @@ class ThreadedCamera:
             self._start_camera()
 
     def release(self) -> None:
+        """Stop the reader thread and release the capture device."""
         self._running = False
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=1.0)

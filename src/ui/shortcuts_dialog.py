@@ -1,6 +1,6 @@
 """
-Окно-плашка со списком комбинаций клавиш и жестов,
-с галочкой 'Больше не показывать при запуске'.
+Cheat-sheet dialog listing hand gestures and keyboard shortcuts,
+with a "Do not show again on startup" checkbox.
 """
 
 from __future__ import annotations
@@ -33,12 +33,12 @@ class ShortcutsDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setSpacing(14)
 
-        # Заголовок
+        # Header
         title = QLabel(f"<h2>{tr('shortcuts_header', self.lang)}</h2>")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(title)
 
-        # Блок жестов
+        # Gestures section
         gestures_box = QVBoxLayout()
         gestures_lbl = QLabel(f"<b>{tr('gestures_section', self.lang)}</b>")
         gestures_box.addWidget(gestures_lbl)
@@ -46,12 +46,12 @@ class ShortcutsDialog(QDialog):
         gestures_box.addWidget(QLabel(tr("gesture_clear_desc", self.lang)))
         layout.addLayout(gestures_box)
 
-        # Разделитель / линия
+        # Separator
         line = QLabel("—" * 35)
         line.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(line)
 
-        # Блок клавиш
+        # Keyboard section
         keys_box = QVBoxLayout()
         keys_lbl = QLabel(f"<b>{tr('keys_section', self.lang)}</b>")
         keys_box.addWidget(keys_lbl)
@@ -66,12 +66,12 @@ class ShortcutsDialog(QDialog):
         keys_box.addWidget(QLabel(tr("key_exit", self.lang)))
         layout.addLayout(keys_box)
 
-        # Галочка 'Больше не показывать'
+        # "Do not show again" checkbox
         self.chk_dont_show = QCheckBox(tr("dont_show_again", self.lang))
         self.chk_dont_show.setChecked(not self.config.show_shortcuts_on_start)
         layout.addWidget(self.chk_dont_show)
 
-        # Кнопка ОК
+        # OK button
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
         self.btn_ok = QPushButton(tr("btn_ok", self.lang))

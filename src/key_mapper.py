@@ -1,7 +1,9 @@
 """
-Модуль для раскладко-независимой обработки горячих клавиш.
-Поддерживает английскую (QWERTY), русскую (ЙЦУКЕН), казахскую раскладки,
-а также физические аппаратные коды клавиш (macOS virtual keycodes) и коды Qt.
+Keyboard-layout-independent hotkey handling.
+
+A key press is resolved in several passes so shortcuts work the same on
+English (QWERTY), Russian (ЙЦУКЕН) and Kazakh layouts: by typed character,
+by Qt key code, and finally by the physical macOS virtual keycode.
 """
 
 from __future__ import annotations
@@ -11,6 +13,8 @@ from typing import Any, Optional, Tuple
 
 
 class Action(Enum):
+    """Logical actions that a hotkey can trigger."""
+
     QUIT = auto()
     CLEAR_CANVAS = auto()
     SAVE_CANVAS = auto()
@@ -22,10 +26,10 @@ class Action(Enum):
     CLEAR_PINCH_INC = auto()
     THICKNESS_INC = auto()
     THICKNESS_DEC = auto()
-    SELECT_COLOR = auto()  # ассоциируется с цифрой 0..9
+    SELECT_COLOR = auto()  # Parameter: digit "0".."9"
 
 
-# macOS ANSI виртуальные сканкоды (физическое расположение клавиши)
+# macOS ANSI virtual keycodes (physical key position, layout-independent)
 MAC_VK_MAP = {
     12: Action.QUIT,             # Q
     8: Action.CLEAR_CANVAS,      # C
@@ -55,9 +59,11 @@ MAC_VK_DIGITS = {
 
 def resolve_qt_key_event(event: Any) -> Tuple[Optional[Action], Optional[str]]:
     """
-    Определяет логическое действие по событию PyQt6 QKeyEvent
-    с учётом русской, казахской и английской раскладок.
-    Возвращает (Action, param_str).
+    Map a PyQt6 ``QKeyEvent`` to a logical action, regardless of the active
+    keyboard layout (English, Russian or Kazakh).
+
+    Returns ``(action, param)``; ``param`` is the digit for ``SELECT_COLOR``
+    and ``None`` otherwise. Returns ``(None, None)`` for unmapped keys.
     """
     text = ""
     try:
@@ -77,66 +83,67 @@ def resolve_qt_key_event(event: Any) -> Tuple[Optional[Action], Optional[str]]:
     except Exception:
         pass
 
-    # 1. Цифры (выбор цвета)
+    # 1. Digits (color selection)
     if text in ("0", "1", "2", "3", "4", "5", "6", "7", "8", "9"):
         return Action.SELECT_COLOR, text
 
-    # Qt Key Enums для цифр
+    # Digits via Qt key codes
     from PyQt6.QtCore import Qt
     if Qt.Key.Key_0 <= key <= Qt.Key.Key_9:
         digit = str(key - Qt.Key.Key_0)
         return Action.SELECT_COLOR, digit
 
-    # macOS сканкод цифр
+    # Digits via macOS keycodes
     if vk is not None and vk in MAC_VK_DIGITS:
         return Action.SELECT_COLOR, MAC_VK_DIGITS[vk]
 
-    # 2. Текстовые соответствия символов (EN / RU / KK)
-    # Выход: Q / q / Й / й
+    # 2. Match by typed character (EN / RU / KK).
+    # Each action lists the Latin letter and the Cyrillic letter on the same key.
+    # Quit: Q / Й
     if text in ("q", "й"):
         return Action.QUIT, None
 
-    # Очистить: C / c / С / с (русская 'с')
+    # Clear: C / Cyrillic С
     if text in ("c", "с"):
         return Action.CLEAR_CANVAS, None
 
-    # Сохранить: S / s / Ы / ы
+    # Save: S / Ы
     if text in ("s", "ы"):
         return Action.SAVE_CANVAS, None
 
-    # Отладка: D / d / В / в
+    # Debug overlay: D / В
     if text in ("d", "в"):
         return Action.TOGGLE_DEBUG, None
 
-    # Скелет: H / h / Р / р
+    # Hand skeleton: H / Р
     if text in ("h", "р"):
         return Action.TOGGLE_SKELETON, None
 
-    # Настройки: O / o / Щ / щ
+    # Settings: O / Щ
     if text in ("o", "щ"):
         return Action.OPEN_SETTINGS, None
 
-    # Справка / клавиши: ? / / / . / , / б / ю
+    # Shortcuts help: ? / . , / Б Ю
     if text in ("?", "/", ".", ",", "б", "ю"):
         return Action.OPEN_SHORTCUTS, None
 
-    # Порог очистки уменьшить: [ / { / х / ш
+    # Decrease clear threshold: [ { / Х Ш
     if text in ("[", "{", "х", "ш"):
         return Action.CLEAR_PINCH_DEC, None
 
-    # Порог очистки увеличить: ] / } / ъ / ғ
+    # Increase clear threshold: ] } / Ъ Ғ
     if text in ("]", "}", "ъ", "ғ"):
         return Action.CLEAR_PINCH_INC, None
 
-    # Толщина +: + / =
+    # Brush thickness +: + / =
     if text in ("+", "=") or key in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
         return Action.THICKNESS_INC, None
 
-    # Толщина -: - / _
+    # Brush thickness -: - / _
     if text in ("-", "_") or key in (Qt.Key.Key_Minus, Qt.Key.Key_Underscore):
         return Action.THICKNESS_DEC, None
 
-    # 3. Qt Key Enums
+    # 3. Match by Qt key code
     qt_key_map = {
         Qt.Key.Key_Q: Action.QUIT,
         Qt.Key.Key_C: Action.CLEAR_CANVAS,
@@ -152,7 +159,7 @@ def resolve_qt_key_event(event: Any) -> Tuple[Optional[Action], Optional[str]]:
     if key in qt_key_map:
         return qt_key_map[key], None
 
-    # 4. macOS Hardware Scancode
+    # 4. Match by physical macOS keycode
     if vk is not None and vk in MAC_VK_MAP:
         return MAC_VK_MAP[vk], None
 
@@ -160,7 +167,7 @@ def resolve_qt_key_event(event: Any) -> Tuple[Optional[Action], Optional[str]]:
 
 
 def resolve_cv2_key(code: int) -> Tuple[Optional[Action], Optional[str]]:
-    """Для обратной совместимости с cv2.waitKey()."""
+    """Map a ``cv2.waitKey()`` code to an action (kept for backward compatibility)."""
     if code < 0:
         return None, None
     char = chr(code & 0xFF).lower() if 0 <= (code & 0xFF) < 128 else ""

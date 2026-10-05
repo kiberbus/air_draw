@@ -1,10 +1,24 @@
+# Virtual environments
 venv/
 venv_build/
+.venv/
+
+# PyInstaller output
 build/
 dist/
 .pyinstaller/
+
+# Python cache
 __pycache__/
 *.pyc
 *.pyo
-.DS_Store
+.pytest_cache/
+
+# User data (config.json is created with defaults on first run)
+config.json
 air_draw_captures/
+
+# OS / editor files
+.DS_Store
+.idea/
+.vscode/

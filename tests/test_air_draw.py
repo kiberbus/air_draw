@@ -1,5 +1,7 @@
 """
-Тестовый набор для проверки всех компонентов Air Draw.
+Unit tests for the Air Draw components.
+
+Run with ``pytest`` or ``python -m tests.test_air_draw`` from the project root.
 """
 
 from __future__ import annotations
@@ -8,7 +10,7 @@ import os
 import sys
 from pathlib import Path
 
-# Устанавливаем оффлайн/headless режим для Qt тестов
+# Run Qt headless so the tests work without a display
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 
 from src.config import (

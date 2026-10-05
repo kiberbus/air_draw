@@ -1,6 +1,6 @@
 """
-Окно настроек со всеми параметрами, сбросом до рекомендуемых (пороги 17, FPS 30),
-выбором языка, определением процессора и настройкой палитры 0-9.
+Settings dialog: language, camera/FPS, MediaPipe and gesture thresholds,
+the 0-9 color palette, CPU info and "reset to recommended".
 """
 
 from __future__ import annotations
@@ -33,13 +33,19 @@ from ..processor_info import detect_processor
 
 
 class SettingsDialog(QDialog):
+    """
+    Edits an ``AppConfig`` in place.
+
+    Changes are written to the config only when "Save & Close" is pressed.
+    """
+
     def __init__(self, config: AppConfig, parent=None) -> None:
         super().__init__(parent)
         self.config = config
         self.lang = config.language
         self.proc_info = detect_processor()
 
-        # Локальная копия палитры для редактирования
+        # Working copy of the palette, applied on save
         self.current_palette: Dict[str, List[int]] = {
             k: list(v) for k, v in config.palette.items()
         }
@@ -57,27 +63,27 @@ class SettingsDialog(QDialog):
         self.tab_widget = QTabWidget()
         main_layout.addWidget(self.tab_widget)
 
-        # 1. Вкладка "Основные"
+        # 1. "General" tab
         self.tab_general = QWidget()
         self._setup_general_tab(self.tab_general)
         self.tab_widget.addTab(self.tab_general, tr("tab_general", self.lang))
 
-        # 2. Вкладка "Камера и FPS"
+        # 2. "Camera & FPS" tab
         self.tab_camera = QWidget()
         self._setup_camera_tab(self.tab_camera)
         self.tab_widget.addTab(self.tab_camera, tr("tab_camera", self.lang))
 
-        # 3. Вкладка "Жесты и пороги"
+        # 3. "Gestures & Thresholds" tab
         self.tab_gestures = QWidget()
         self._setup_gestures_tab(self.tab_gestures)
         self.tab_widget.addTab(self.tab_gestures, tr("tab_gestures", self.lang))
 
-        # 4. Вкладка "Палитра (0-9)"
+        # 4. "Palette (0-9)" tab
         self.tab_palette = QWidget()
         self._setup_palette_tab(self.tab_palette)
         self.tab_widget.addTab(self.tab_palette, tr("tab_palette", self.lang))
 
-        # Нижняя панель кнопок
+        # Bottom button row
         bottom_layout = QHBoxLayout()
 
         self.btn_reset = QPushButton(tr("reset_recommended", self.lang))
@@ -103,7 +109,7 @@ class SettingsDialog(QDialog):
 
         form = QFormLayout()
 
-        # Выбор языка
+        # Language
         self.combo_lang = QComboBox()
         self.combo_lang.addItem("Русский", "ru")
         self.combo_lang.addItem("Қазақша", "kk")
@@ -114,19 +120,24 @@ class SettingsDialog(QDialog):
             self.combo_lang.setCurrentIndex(idx)
         form.addRow(tr("language_select", self.lang), self.combo_lang)
 
-        # Чекбокс подсказки при старте
+        # Show shortcuts on startup
         self.chk_startup = QCheckBox(tr("startup_shortcuts_toggle", self.lang))
         self.chk_startup.setChecked(self.config.show_shortcuts_on_start)
         form.addRow("", self.chk_startup)
 
         layout.addLayout(form)
 
-        # Определение процессора
+        # Detected CPU
         group_proc = QGroupBox(tr("processor_header", self.lang))
         proc_layout = QVBoxLayout(group_proc)
 
         lbl_cpu = QLabel(f"<b>{self.proc_info.brand}</b>")
-        lbl_arch = QLabel(f"Архитектура: {self.proc_info.architecture} | Ядер: {self.proc_info.logical_cores} ({self.proc_info.physical_cores} физ.)")
+        lbl_arch = QLabel(tr(
+            "processor_details", self.lang,
+            arch=self.proc_info.architecture,
+            logical=self.proc_info.logical_cores,
+            physical=self.proc_info.physical_cores,
+        ))
         proc_layout.addWidget(lbl_cpu)
         proc_layout.addWidget(lbl_arch)
 
@@ -143,16 +154,16 @@ class SettingsDialog(QDialog):
         layout = QVBoxLayout(tab)
         form = QFormLayout()
 
-        # Индекс камеры
+        # Camera index
         self.spin_cam_idx = QSpinBox()
         self.spin_cam_idx.setRange(0, 10)
         self.spin_cam_idx.setValue(self.config.camera_index)
         form.addRow(tr("camera_index_label", self.lang), self.spin_cam_idx)
 
-        # Разрешение камеры
+        # Camera resolution
         self.combo_res = QComboBox()
         self.combo_res.addItem("640 x 480", (640, 480))
-        self.combo_res.addItem("960 x 540 (Рекомендуется)", (960, 540))
+        self.combo_res.addItem(f"960 x 540 {tr('recommended_suffix', self.lang)}", (960, 540))
         self.combo_res.addItem("1280 x 720 (HD)", (1280, 720))
         self.combo_res.addItem("1920 x 1080 (Full HD)", (1920, 1080))
 
@@ -164,19 +175,20 @@ class SettingsDialog(QDialog):
                 found_res = True
                 break
         if not found_res:
+            # Custom resolution from config.json — add it so it is not lost
             self.combo_res.addItem(f"{current_res[0]} x {current_res[1]}", current_res)
             self.combo_res.setCurrentIndex(self.combo_res.count() - 1)
 
         form.addRow(tr("camera_resolution_label", self.lang), self.combo_res)
 
-        # Ограничение FPS (рекомендуемое 30)
+        # FPS limit
         self.combo_fps = QComboBox()
         self.combo_fps.addItem("15 FPS", 15)
         self.combo_fps.addItem("20 FPS", 20)
         self.combo_fps.addItem("24 FPS", 24)
-        self.combo_fps.addItem("30 FPS (Рекомендуется)", 30)
+        self.combo_fps.addItem(f"30 FPS {tr('recommended_suffix', self.lang)}", 30)
         self.combo_fps.addItem("60 FPS", 60)
-        self.combo_fps.addItem("Без ограничений", 0)
+        self.combo_fps.addItem(tr("fps_unlimited", self.lang), 0)
 
         found_fps = False
         for i in range(self.combo_fps.count()):
@@ -190,7 +202,7 @@ class SettingsDialog(QDialog):
 
         form.addRow(tr("fps_limit_label", self.lang), self.combo_fps)
 
-        # Модель MediaPipe (0 - быстрая, 1 - точная)
+        # MediaPipe model complexity (0 = fast, 1 = accurate)
         self.combo_model = QComboBox()
         self.combo_model.addItem(tr("model_fast", self.lang), 0)
         self.combo_model.addItem(tr("model_accurate", self.lang), 1)
@@ -199,14 +211,14 @@ class SettingsDialog(QDialog):
             self.combo_model.setCurrentIndex(idx_m)
         form.addRow(tr("model_complexity_label", self.lang), self.combo_model)
 
-        # Масштаб детекции
+        # Detection frame scale
         self.spin_scale = QDoubleSpinBox()
         self.spin_scale.setRange(0.25, 1.0)
         self.spin_scale.setSingleStep(0.1)
         self.spin_scale.setValue(self.config.detection_scale)
         form.addRow(tr("detection_scale_label", self.lang), self.spin_scale)
 
-        # Пороги confidence
+        # Detection / tracking confidence
         self.spin_det_conf = QDoubleSpinBox()
         self.spin_det_conf.setRange(0.1, 1.0)
         self.spin_det_conf.setSingleStep(0.05)
@@ -227,30 +239,30 @@ class SettingsDialog(QDialog):
         layout = QVBoxLayout(tab)
         form = QFormLayout()
 
-        # DRAW_PINCH_RATIO (рекомендуется строго 17)
+        # Draw pinch ratio (recommended: 17)
         self.spin_draw_pinch = QSpinBox()
         self.spin_draw_pinch.setRange(5, 50)
         self.spin_draw_pinch.setValue(self.config.draw_pinch_ratio)
         form.addRow(tr("draw_pinch_label", self.lang), self.spin_draw_pinch)
 
-        # CLEAR_PINCH_RATIO (рекомендуется строго 17)
+        # Clear pinch ratio (recommended: 17)
         self.spin_clear_pinch = QSpinBox()
         self.spin_clear_pinch.setRange(5, 50)
         self.spin_clear_pinch.setValue(self.config.clear_pinch_ratio)
         form.addRow(tr("clear_pinch_label", self.lang), self.spin_clear_pinch)
 
-        # Окно сглаживания
+        # Smoothing window
         self.spin_smoothing = QSpinBox()
         self.spin_smoothing.setRange(1, 15)
         self.spin_smoothing.setValue(self.config.smoothing_window)
         form.addRow(tr("smoothing_label", self.lang), self.spin_smoothing)
 
-        # Скелет руки
+        # Hand skeleton
         self.chk_skeleton = QCheckBox(tr("show_skeleton_label", self.lang))
         self.chk_skeleton.setChecked(self.config.show_skeleton)
         form.addRow("", self.chk_skeleton)
 
-        # Отладочный оверлей
+        # Debug overlay
         self.chk_debug = QCheckBox(tr("show_debug_label", self.lang))
         self.chk_debug.setChecked(self.config.show_debug)
         form.addRow("", self.chk_debug)
@@ -279,7 +291,7 @@ class SettingsDialog(QDialog):
             lbl.setFixedWidth(100)
             row_layout.addWidget(lbl)
 
-            # Кнопка с образцом цвета
+            # Color swatch
             bgr = self.current_palette.get(d, [0, 255, 0])
             btn_color = QPushButton()
             btn_color.setFixedSize(50, 26)
@@ -287,7 +299,7 @@ class SettingsDialog(QDialog):
             row_layout.addWidget(btn_color)
             self.color_buttons[d] = btn_color
 
-            # Кнопка выбора цвета
+            # Color picker button
             btn_pick = QPushButton(tr("pick_color_btn", self.lang))
             btn_pick.clicked.connect(lambda _, key=d: self._on_pick_color(key))
             row_layout.addWidget(btn_pick)
@@ -300,7 +312,7 @@ class SettingsDialog(QDialog):
         layout.addWidget(scroll)
 
     def _update_button_color(self, btn: QPushButton, bgr: List[int]) -> None:
-        # BGR -> RGB для CSS
+        # BGR -> RGB for CSS
         r, g, b = bgr[2], bgr[1], bgr[0]
         btn.setStyleSheet(
             f"background-color: rgb({r}, {g}, {b}); border: 1px solid #777; border-radius: 3px;"
@@ -309,14 +321,14 @@ class SettingsDialog(QDialog):
     def _on_pick_color(self, key: str) -> None:
         current_bgr = self.current_palette.get(key, [0, 255, 0])
         initial = QColor(current_bgr[2], current_bgr[1], current_bgr[0])
-        chosen = QColorDialog.getColor(initial, self, f"Выбор цвета для клавиши {key}")
+        chosen = QColorDialog.getColor(initial, self, tr("pick_color_title", self.lang, key=key))
         if chosen.isValid():
             new_bgr = [chosen.blue(), chosen.green(), chosen.red()]
             self.current_palette[key] = new_bgr
             if key in self.color_buttons:
                 self._update_button_color(self.color_buttons[key], new_bgr)
 
-    # ----------------- Сброс до рекомендуемых ----------------- #
+    # ----------------- Reset to recommended ----------------- #
     def _on_reset_recommended(self) -> None:
         reply = QMessageBox.question(
             self,
@@ -327,45 +339,45 @@ class SettingsDialog(QDialog):
         )
         if reply == QMessageBox.StandardButton.Yes:
             rec = get_recommended_config()
-            # Обновляем поля UI
+            # Only the widgets are updated; nothing is saved until "Save & Close"
             self.spin_cam_idx.setValue(rec.camera_index)
 
-            # Разрешение
+            # Resolution
             for i in range(self.combo_res.count()):
                 if self.combo_res.itemData(i) == (rec.width, rec.height):
                     self.combo_res.setCurrentIndex(i)
                     break
 
-            # FPS: 30
+            # FPS
             for i in range(self.combo_fps.count()):
-                if self.combo_fps.itemData(i) == 30:
+                if self.combo_fps.itemData(i) == rec.fps_limit:
                     self.combo_fps.setCurrentIndex(i)
                     break
 
-            # Модель и scale
-            self.combo_model.setCurrentIndex(0)
+            # Model and detection parameters
+            self.combo_model.setCurrentIndex(self.combo_model.findData(rec.model_complexity))
             self.spin_scale.setValue(rec.detection_scale)
             self.spin_det_conf.setValue(rec.detection_confidence)
             self.spin_track_conf.setValue(rec.tracking_confidence)
 
-            # Пороги: строго 17!
-            self.spin_draw_pinch.setValue(17)
-            self.spin_clear_pinch.setValue(17)
+            # Gesture thresholds
+            self.spin_draw_pinch.setValue(rec.draw_pinch_ratio)
+            self.spin_clear_pinch.setValue(rec.clear_pinch_ratio)
             self.spin_smoothing.setValue(rec.smoothing_window)
 
             self.chk_skeleton.setChecked(rec.show_skeleton)
             self.chk_debug.setChecked(rec.show_debug)
             self.chk_startup.setChecked(rec.show_shortcuts_on_start)
 
-            # Палитра
+            # Palette
             self.current_palette = {k: list(v) for k, v in rec.palette.items()}
             for k, btn in self.color_buttons.items():
                 if k in self.current_palette:
                     self._update_button_color(btn, self.current_palette[k])
 
-    # ----------------- Сохранение ----------------- #
+    # ----------------- Save ----------------- #
     def _on_save(self) -> None:
-        # Применяем значения в config
+        # Copy widget values into the config
         new_lang = self.combo_lang.currentData()
         self.config.language = new_lang
         self.config.show_shortcuts_on_start = self.chk_startup.isChecked()
@@ -383,7 +395,7 @@ class SettingsDialog(QDialog):
         self.config.detection_confidence = self.spin_det_conf.value()
         self.config.tracking_confidence = self.spin_track_conf.value()
 
-        # Пороги пинча
+        # Pinch thresholds
         self.config.draw_pinch_ratio = self.spin_draw_pinch.value()
         self.config.clear_pinch_ratio = self.spin_clear_pinch.value()
         self.config.smoothing_window = self.spin_smoothing.value()
@@ -391,9 +403,9 @@ class SettingsDialog(QDialog):
         self.config.show_skeleton = self.chk_skeleton.isChecked()
         self.config.show_debug = self.chk_debug.isChecked()
 
-        # Палитра
+        # Palette
         self.config.palette = {k: list(v) for k, v in self.current_palette.items()}
 
-        # Сохраняем на диск в config.json
+        # Persist to config.json
         save_config(self.config)
         self.accept()

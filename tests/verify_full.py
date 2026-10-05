@@ -1,11 +1,15 @@
 """
-Комплексный стресс-тест и верификация всех модулей Air Draw:
-- Проверка словарей локализации на полноту и отсутствие KeyError при форматировании
-- Инициализация MediaPipe Hands и симуляция обработки кадров через _process_hand
-- Симуляция вызова всех методов MainWindow (выбор цветов 0-9, очистка, сохранение, жесты)
-- Проверка SettingsDialog (смена всех полей, сброс до рекомендуемых, сохранение в config.json)
-- Проверка ShortcutsDialog (состояние чекбокса, сохранение)
-- Проверка потокобезопасности ThreadedCamera и корректности завершения
+End-to-end smoke test of all Air Draw modules:
+
+- translation tables are complete and every string formats without errors
+- MediaPipe Hands initializes and frames go through ``_process_hand``
+- MainWindow actions (colors 0-9, clear, save, gestures, hotkeys)
+- SettingsDialog (editing fields, reset to recommended, saving to config.json)
+- ShortcutsDialog (checkbox state, saving)
+- ThreadedCamera starts and shuts down cleanly
+
+Run with ``python -m tests.verify_full`` from the project root.
+A webcam is optional; without one the camera simply yields no frames.
 """
 
 from __future__ import annotations
@@ -14,7 +18,7 @@ import os
 import sys
 from pathlib import Path
 
-# Устанавливаем offscreen платформу для работы Qt без дисплея
+# Run Qt headless so the script works without a display
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 
 import cv2
@@ -56,145 +60,148 @@ class MockKeyEvent:
 
 
 def verify_translations() -> None:
-    print("1. Проверка словарей переводов...")
+    print("1. Checking translation tables...")
     languages = ["ru", "kk", "en"]
     base_keys = set(TRANSLATIONS["ru"].keys())
 
     for lang in languages:
-        assert lang in TRANSLATIONS, f"Отсутствует язык {lang}"
+        assert lang in TRANSLATIONS, f"Missing language {lang}"
         lang_keys = set(TRANSLATIONS[lang].keys())
         missing = base_keys - lang_keys
-        assert not missing, f"В языке {lang} отсутствуют ключи: {missing}"
+        assert not missing, f"Language {lang} is missing keys: {missing}"
 
-        # Проверяем форматирование строк с параметрами
+        # Every string must format with the known placeholders
         for k in base_keys:
             try:
-                res = tr(k, lang=lang, num="5", val=10, filename="test.png", path="test/path", key="1")
+                res = tr(
+                    k, lang=lang, num="5", val=10, filename="test.png", path="test/path", key="1",
+                    name="IDLE", arch="arm64", logical=8, physical=8,
+                )
                 assert isinstance(res, str) and len(res) > 0
             except Exception as e:
-                raise AssertionError(f"Ошибка форматирования ключа '{k}' для языка '{lang}': {e}")
+                raise AssertionError(f"Failed to format key '{k}' for language '{lang}': {e}")
 
-    print("   ✓ Все 3 языка (RU, KK, EN) содержат все ключи и корректно форматируются!")
+    print("   ✓ All 3 languages (RU, KK, EN) have every key and format correctly")
 
 
 def verify_processor_info() -> None:
-    print("2. Проверка детекции процессора...")
+    print("2. Checking CPU detection...")
     info = detect_processor()
-    assert info.brand, "Модель процессора пустая"
-    assert info.architecture in ("arm64", "x86_64", "AMD64", "aarch64", "arm"), f"Неизвестная архитектура: {info.architecture}"
+    assert info.brand, "CPU brand is empty"
+    assert info.architecture in ("arm64", "x86_64", "AMD64", "aarch64", "arm"), f"Unknown architecture: {info.architecture}"
     assert info.logical_cores >= 1
     assert info.physical_cores >= 1
     display = info.get_display_name()
     assert info.brand in display
     cpu_load = info.get_cpu_load()
-    print(f"   ✓ Процессор: {display} | Загрузка: {cpu_load}%")
+    print(f"   ✓ CPU: {display} | Load: {cpu_load}%")
 
 
 def verify_config_and_recommended() -> None:
-    print("3. Проверка параметров конфигурации и строгих ограничений...")
+    print("3. Checking config defaults...")
     rec = get_recommended_config()
-    # Строго по ТЗ: DRAW_PINCH_RATIO и CLEAR_PINCH_RATIO строго 17, не больше не меньше
-    assert rec.draw_pinch_ratio == 17, f"ОШИБКА: draw_pinch_ratio должен быть 17, а не {rec.draw_pinch_ratio}"
-    assert rec.clear_pinch_ratio == 17, f"ОШИБКА: clear_pinch_ratio должен быть 17, а не {rec.clear_pinch_ratio}"
-    assert rec.fps_limit == 30, f"ОШИБКА: fps_limit должен быть 30, а не {rec.fps_limit}"
+    # Recommended values: pinch ratios 17, 30 FPS
+    assert rec.draw_pinch_ratio == 17, f"draw_pinch_ratio must be 17, got {rec.draw_pinch_ratio}"
+    assert rec.clear_pinch_ratio == 17, f"clear_pinch_ratio must be 17, got {rec.clear_pinch_ratio}"
+    assert rec.fps_limit == 30, f"fps_limit must be 30, got {rec.fps_limit}"
 
-    # Проверяем все 10 цифр палитры
+    # All 10 palette digits must be valid BGR colors
     for digit in "0123456789":
-        assert digit in rec.palette, f"Цифра {digit} отсутствует в палитре"
+        assert digit in rec.palette, f"Digit {digit} is missing from the palette"
         color = rec.palette[digit]
-        assert len(color) == 3, f"Цвет для {digit} должен иметь 3 канала (BGR)"
+        assert len(color) == 3, f"Color for {digit} must have 3 channels (BGR)"
         for c in color:
-            assert 0 <= c <= 255, f"Значение канала цвета вне диапазона 0..255: {c}"
+            assert 0 <= c <= 255, f"Color channel out of range 0..255: {c}"
 
-    # Проверка сохранения и чтения
+    # Save / load round trip
     save_config(rec)
     loaded = load_config()
     assert loaded.draw_pinch_ratio == 17
     assert loaded.clear_pinch_ratio == 17
     assert loaded.fps_limit == 30
-    print("   ✓ Конфигурация и строгие пороги (17, 30) валидны!")
+    print("   ✓ Config defaults (17, 30) are valid")
 
 
 def verify_ui_components(app: QApplication) -> None:
-    print("4. Проверка UI компонентов и циклов обработки...")
+    print("4. Checking UI components and the frame pipeline...")
     cfg = get_recommended_config()
 
     # 4.1 ShortcutsDialog
     sc_dlg = ShortcutsDialog(cfg)
     assert sc_dlg.chk_dont_show is not None
-    # Тест клика ОК
+    # Simulate clicking OK
     sc_dlg.chk_dont_show.setChecked(False)
     sc_dlg._on_ok()
     assert cfg.show_shortcuts_on_start is True
     sc_dlg.close()
-    print("   ✓ ShortcutsDialog протестирован.")
+    print("   ✓ ShortcutsDialog OK")
 
     # 4.2 SettingsDialog
     st_dlg = SettingsDialog(cfg)
-    # Проверка смены языка
+    # Language switching
     for i in range(st_dlg.combo_lang.count()):
         st_dlg.combo_lang.setCurrentIndex(i)
         assert st_dlg.combo_lang.currentData() in ("ru", "kk", "en")
 
-    # Проверка изменения порогов
+    # Threshold editing
     st_dlg.spin_draw_pinch.setValue(17)
     st_dlg.spin_clear_pinch.setValue(17)
     st_dlg.combo_fps.setCurrentIndex(3)  # 30 FPS
 
-    # Проверка палитры кнопок в настройках
+    # Palette buttons
     for digit in "0123456789":
         assert digit in st_dlg.color_buttons
-        # Имитация выбора цвета
+        # Simulate picking a color
         st_dlg.current_palette[digit] = [100, 150, 200]
         st_dlg._update_button_color(st_dlg.color_buttons[digit], [100, 150, 200])
 
-    # Проверка сброса к рекомендуемым (внутренняя логика)
+    # Reset to recommended values
     rec = get_recommended_config()
     st_dlg.spin_draw_pinch.setValue(rec.draw_pinch_ratio)
     st_dlg.spin_clear_pinch.setValue(rec.clear_pinch_ratio)
     assert st_dlg.spin_draw_pinch.value() == 17
     assert st_dlg.spin_clear_pinch.value() == 17
 
-    # Сохранение настроек
+    # Save settings
     st_dlg._on_save()
     assert cfg.draw_pinch_ratio == 17
     assert cfg.clear_pinch_ratio == 17
     st_dlg.close()
-    print("   ✓ SettingsDialog протестирован.")
+    print("   ✓ SettingsDialog OK")
 
     # 4.3 MainWindow
     win = MainWindow(cfg)
 
-    # Проверка переключения всех цветов 0-9
+    # Switch through all colors 0-9
     for digit in "0123456789":
         win._select_color(digit)
         assert win.config.current_color_key == digit
         bgr = win.config.get_color_bgr()
         assert len(bgr) == 3
 
-    # Проверка толщины кисти
+    # Brush thickness
     old_th = win.config.thickness
     win._increase_thickness()
     assert win.config.thickness == old_th + 1
     win._decrease_thickness()
     assert win.config.thickness == old_th
 
-    # Проверка очистки холста
+    # Clear canvas
     win.canvas[10:50, 10:50] = 255
     win.canvas_mask[10:50, 10:50] = 255
     win._clear_canvas()
     assert np.count_nonzero(win.canvas) == 0
     assert np.count_nonzero(win.canvas_mask) == 0
 
-    # Проверка сохранения холста
+    # Save canvas
     win.canvas[10:20, 10:20] = [0, 255, 0]
     win._save_canvas()
     captures = list(Path("air_draw_captures").glob("*.png"))
-    assert len(captures) > 0, "Файл рисунка не сохранился"
+    assert len(captures) > 0, "Drawing was not saved"
 
-    # Проверка обработки кадра через MediaPipe
+    # Run a frame through MediaPipe
     test_frame = np.zeros((win.height, win.width, 3), dtype=np.uint8)
-    # Рисуем искусственный круг на кадре (чтобы кадр был не пустой)
+    # Draw a circle so the frame is not empty
     cv2.circle(test_frame, (win.width // 2, win.height // 2), 50, (200, 200, 200), -1)
 
     info = win._process_hand(test_frame)
@@ -204,16 +211,16 @@ def verify_ui_components(app: QApplication) -> None:
     win._display_frame(comp)
     win._update_status_bar(info)
 
-    # Проверка клавиш через keyPressEvent
+    # Hotkeys via keyPressEvent
     keys_to_test = [
         MockKeyEvent(text="c"),
-        MockKeyEvent(text="с"),  # русская с
+        MockKeyEvent(text="с"),  # Cyrillic С
         MockKeyEvent(text="s"),
-        MockKeyEvent(text="ы"),  # русская ы
+        MockKeyEvent(text="ы"),  # Cyrillic Ы
         MockKeyEvent(text="d"),
-        MockKeyEvent(text="в"),  # русская в
+        MockKeyEvent(text="в"),  # Cyrillic В
         MockKeyEvent(text="h"),
-        MockKeyEvent(text="р"),  # русская р
+        MockKeyEvent(text="р"),  # Cyrillic Р
         MockKeyEvent(text="+"),
         MockKeyEvent(text="-"),
         MockKeyEvent(text="1"),
@@ -224,7 +231,7 @@ def verify_ui_components(app: QApplication) -> None:
         win.keyPressEvent(k_ev)
 
     win.close()
-    print("   ✓ MainWindow и пайплайн обработки кадров протестированы без ошибок.")
+    print("   ✓ MainWindow and the frame pipeline OK")
 
 
 def main() -> None:
@@ -234,8 +241,7 @@ def main() -> None:
     verify_config_and_recommended()
     verify_ui_components(app)
     print("\n==============================================")
-    print("ВЕСЬ ФУНКЦИОНАЛ РАБОТАЕТ ПОЛНОСТЬЮ КОРРЕКТНО!")
-    print("ОШИБОК И ПРЕДУПРЕЖДЕНИЙ НЕ ОБНАРУЖЕНО.")
+    print("ALL CHECKS PASSED")
     print("==============================================")
 
 

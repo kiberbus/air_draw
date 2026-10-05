@@ -1,6 +1,7 @@
 """
-Модуль для определения информации о процессоре и системных ресурсах.
-Поддерживает macOS (Apple Silicon и Intel), Linux и Windows.
+CPU and system resource detection.
+
+Supports macOS (Apple Silicon and Intel), Linux and Windows.
 """
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ class ProcessorInfo:
         return f"{self.brand} ({self.logical_cores} cores, {self.architecture})"
 
     def get_cpu_load(self) -> Optional[float]:
+        """Current system-wide CPU usage in percent, or ``None`` without psutil."""
         if psutil is not None:
             try:
                 return psutil.cpu_percent(interval=None)
@@ -37,12 +39,12 @@ class ProcessorInfo:
 
 
 def detect_processor() -> ProcessorInfo:
-    """Определяет модель процессора, архитектуру и количество ядер."""
+    """Detect the CPU model, architecture and core counts."""
     brand = ""
     system = platform.system()
 
     if system == "Darwin":
-        # macOS: попытка получить бренд процессора через sysctl
+        # macOS: read the CPU brand string via sysctl
         try:
             out = subprocess.check_output(
                 ["sysctl", "-n", "machdep.cpu.brand_string"],

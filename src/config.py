@@ -1,6 +1,6 @@
 """
-Модуль конфигурации приложения Air Draw, настроек по умолчанию,
-персистентности (JSON) и многоязычной локализации (RU, KK, EN).
+Air Draw configuration: default settings, JSON persistence and
+UI localization (Russian, Kazakh, English).
 """
 
 from __future__ import annotations
@@ -15,8 +15,8 @@ logger = logging.getLogger("air_draw.config")
 
 CONFIG_FILE_NAME = "config.json"
 
-# Рекомендуемые настройки строго по ТЗ:
-# DRAW_PINCH_RATIO и CLEAR_PINCH_RATIO строго 17 (0.17), FPS 30
+# Recommended defaults. Pinch ratios are stored as integer percentages of the
+# hand size (17 -> 0.17); 17 and 30 FPS are the tuned recommended values.
 RECOMMENDED_DEFAULTS = {
     "language": "ru",
     "show_shortcuts_on_start": True,
@@ -28,43 +28,45 @@ RECOMMENDED_DEFAULTS = {
     "detection_confidence": 0.6,
     "tracking_confidence": 0.6,
     "detection_scale": 1.0,
-    "draw_pinch_ratio": 17,   # Строго 17 (не больше не меньше)
-    "clear_pinch_ratio": 17,  # Строго 17 (не больше не меньше)
+    "draw_pinch_ratio": 17,
+    "clear_pinch_ratio": 17,
     "smoothing_window": 4,
     "thickness": 5,
     "current_color_key": "1",
     "show_skeleton": True,
     "show_debug": False,
-    "palette": {
-        "1": [0, 255, 0],     # Зелёный (BGR)
-        "2": [0, 0, 255],     # Красный
-        "3": [255, 0, 0],     # Синий
-        "4": [0, 255, 255],   # Жёлтый
-        "5": [255, 255, 0],   # Бирюзовый / Голубой
-        "6": [255, 0, 255],   # Пурпурный / Розовый
-        "7": [0, 165, 255],   # Оранжевый
-        "8": [255, 255, 255], # Белый
-        "9": [30, 30, 30],    # Тёмно-серый / Чёрный
-        "0": [128, 128, 128], # Серый
+    "palette": {  # Digit key -> brush color in BGR order (OpenCV)
+        "1": [0, 255, 0],     # Green
+        "2": [0, 0, 255],     # Red
+        "3": [255, 0, 0],     # Blue
+        "4": [0, 255, 255],   # Yellow
+        "5": [255, 255, 0],   # Cyan
+        "6": [255, 0, 255],   # Magenta
+        "7": [0, 165, 255],   # Orange
+        "8": [255, 255, 255], # White
+        "9": [30, 30, 30],    # Near black
+        "0": [128, 128, 128], # Gray
     },
 }
 
 
 @dataclass
 class AppConfig:
+    """All user-tunable settings; persisted to ``config.json``."""
+
     language: str = "ru"  # "ru", "kk", "en"
     show_shortcuts_on_start: bool = True
     camera_index: int = 0
     width: int = 960
     height: int = 540
-    fps_limit: int = 30  # Рекомендуемое: 30
-    model_complexity: int = 0  # 0 - быстрая, 1 - точная
+    fps_limit: int = 30  # 0 = unlimited
+    model_complexity: int = 0  # 0 = fast, 1 = accurate
     detection_confidence: float = 0.6
     tracking_confidence: float = 0.6
-    detection_scale: float = 1.0
-    draw_pinch_ratio: int = 17   # Рекомендуемое: 17 (0.17)
-    clear_pinch_ratio: int = 17  # Рекомендуемое: 17 (0.17)
-    smoothing_window: int = 4
+    detection_scale: float = 1.0  # Downscale factor for the frame fed to MediaPipe
+    draw_pinch_ratio: int = 17   # Percent of hand size
+    clear_pinch_ratio: int = 17  # Percent of hand size
+    smoothing_window: int = 4  # Moving-average window, in frames
     thickness: int = 5
     current_color_key: str = "1"
     show_skeleton: bool = True
@@ -82,6 +84,7 @@ class AppConfig:
         return self.clear_pinch_ratio / 100.0
 
     def get_color_bgr(self, key: Optional[str] = None) -> Tuple[int, int, int]:
+        """Return the BGR color for a palette key (defaults to the active color)."""
         k = key or self.current_color_key
         c = self.palette.get(str(k), [0, 255, 0])
         return int(c[0]), int(c[1]), int(c[2])
@@ -91,13 +94,15 @@ class AppConfig:
 
 
 def get_config_path() -> Path:
+    """Path to ``config.json`` in the project root."""
     return Path(__file__).resolve().parent.parent / CONFIG_FILE_NAME
 
 
 def load_config() -> AppConfig:
+    """Load settings from disk, creating the file with defaults if missing."""
     config_file = get_config_path()
     if not config_file.exists():
-        logger.info("Файл конфигурации не найден, используются рекомендуемые настройки.")
+        logger.info("Config file not found, using recommended settings.")
         cfg = get_recommended_config()
         save_config(cfg)
         return cfg
@@ -105,7 +110,7 @@ def load_config() -> AppConfig:
     try:
         with open(config_file, "r", encoding="utf-8") as f:
             data = json.load(f)
-        # Объединяем с рекомендуемыми defaults для обратной совместимости
+        # Merge over the defaults so configs from older versions still load
         merged = dict(RECOMMENDED_DEFAULTS)
         merged.update(data)
         if "palette" in data and isinstance(data["palette"], dict):
@@ -113,7 +118,7 @@ def load_config() -> AppConfig:
             p.update(data["palette"])
             merged["palette"] = p
 
-        # Гарантируем типы данных
+        # Coerce types in case the file was edited by hand
         return AppConfig(
             language=str(merged.get("language", "ru")),
             show_shortcuts_on_start=bool(merged.get("show_shortcuts_on_start", True)),
@@ -135,23 +140,24 @@ def load_config() -> AppConfig:
             palette=dict(merged.get("palette", RECOMMENDED_DEFAULTS["palette"])),
         )
     except Exception as e:
-        logger.error(f"Ошибка загрузки конфигурации: {e}. Загружены рекомендуемые настройки.")
+        logger.error(f"Failed to load config: {e}. Falling back to recommended settings.")
         return get_recommended_config()
 
 
 def save_config(cfg: AppConfig) -> None:
+    """Write settings to ``config.json``."""
     config_file = get_config_path()
     try:
         data = asdict(cfg)
         with open(config_file, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
-        logger.info("Конфигурация успешно сохранена в %s", config_file)
+        logger.info("Config saved to %s", config_file)
     except Exception as e:
-        logger.error("Не удалось сохранить конфигурацию: %s", e)
+        logger.error("Failed to save config: %s", e)
 
 
 def get_recommended_config() -> AppConfig:
-    """Возвращает настройки с строго рекомендуемыми параметрами (пороги 17, FPS 30)."""
+    """Return a fresh config with the recommended settings (pinch 17, 30 FPS)."""
     return AppConfig(
         language=RECOMMENDED_DEFAULTS["language"],
         show_shortcuts_on_start=RECOMMENDED_DEFAULTS["show_shortcuts_on_start"],
@@ -163,8 +169,8 @@ def get_recommended_config() -> AppConfig:
         detection_confidence=RECOMMENDED_DEFAULTS["detection_confidence"],
         tracking_confidence=RECOMMENDED_DEFAULTS["tracking_confidence"],
         detection_scale=RECOMMENDED_DEFAULTS["detection_scale"],
-        draw_pinch_ratio=17,   # 17 не больше не меньше
-        clear_pinch_ratio=17,  # 17 не больше не меньше
+        draw_pinch_ratio=RECOMMENDED_DEFAULTS["draw_pinch_ratio"],
+        clear_pinch_ratio=RECOMMENDED_DEFAULTS["clear_pinch_ratio"],
         smoothing_window=RECOMMENDED_DEFAULTS["smoothing_window"],
         thickness=RECOMMENDED_DEFAULTS["thickness"],
         current_color_key=RECOMMENDED_DEFAULTS["current_color_key"],
@@ -175,7 +181,7 @@ def get_recommended_config() -> AppConfig:
 
 
 # --------------------------------------------------------------------------- #
-# Многоязычная локализация (Русский / Қазақша / English)
+# Localization (Russian / Kazakh / English)
 # --------------------------------------------------------------------------- #
 
 TRANSLATIONS: Dict[str, Dict[str, str]] = {
@@ -239,6 +245,11 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "status_cleared": "Холст очищен",
         "thickness_label": "Толщина: {val}",
         "current_color_label": "Цвет: {key}",
+        "gesture_label": "ЖЕСТ: {name}",
+        "processor_details": "Архитектура: {arch} | Ядер: {logical} ({physical} физ.)",
+        "recommended_suffix": "(Рекомендуется)",
+        "fps_unlimited": "Без ограничений",
+        "pick_color_title": "Выбор цвета для клавиши {key}",
     },
     "kk": {
         "app_title": "Air Draw — Қол қимылдарымен сурет салу",
@@ -300,6 +311,11 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "status_cleared": "Кенеп тазаланды",
         "thickness_label": "Қалыңдық: {val}",
         "current_color_label": "Түс: {key}",
+        "gesture_label": "ҚИМЫЛ: {name}",
+        "processor_details": "Архитектура: {arch} | Ядро: {logical} ({physical} физ.)",
+        "recommended_suffix": "(Ұсынылады)",
+        "fps_unlimited": "Шектеусіз",
+        "pick_color_title": "{key} пернесі үшін түс таңдау",
     },
     "en": {
         "app_title": "Air Draw — Hand Gestures Air Canvas",
@@ -361,12 +377,17 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "status_cleared": "Canvas cleared",
         "thickness_label": "Thickness: {val}",
         "current_color_label": "Color: {key}",
+        "gesture_label": "GESTURE: {name}",
+        "processor_details": "Architecture: {arch} | Cores: {logical} ({physical} physical)",
+        "recommended_suffix": "(Recommended)",
+        "fps_unlimited": "Unlimited",
+        "pick_color_title": "Choose color for key {key}",
     },
 }
 
 
 def tr(msg_key: str, lang: str = "ru", **kwargs: Any) -> str:
-    """Возвращает переведённую строку по ключу."""
+    """Return the translated string for ``msg_key``, falling back to Russian."""
     pack = TRANSLATIONS.get(lang, TRANSLATIONS["ru"])
     msg = pack.get(msg_key, TRANSLATIONS["ru"].get(msg_key, msg_key))
     if kwargs:
