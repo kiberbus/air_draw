@@ -11,7 +11,6 @@ import logging
 import time
 from collections import deque
 from datetime import datetime
-from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 import cv2
@@ -30,7 +29,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ..camera import ThreadedCamera
-from ..config import AppConfig, save_config, tr
+from ..config import AppConfig, get_data_dir, save_config, tr
 from ..gestures import (
     Gesture,
     GestureInfo,
@@ -59,7 +58,7 @@ class MainWindow(QMainWindow):
         self.lang = config.language
         self.proc_info = detect_processor()
 
-        self.output_dir = Path("air_draw_captures")
+        self.output_dir = get_data_dir() / "air_draw_captures"
         self.output_dir.mkdir(exist_ok=True)
 
         # Camera

@@ -17,10 +17,22 @@ Hand tracking is done with [MediaPipe Hands](https://ai.google.dev/edge/mediapip
 - **Layout-independent hotkeys** — shortcuts work on English, Russian and Kazakh keyboard layouts.
 - **Localized UI** — English, Russian (Русский) and Kazakh (Қазақша).
 - **Settings dialog** — camera, resolution, FPS limit, MediaPipe model, thresholds, palette; one-click reset to recommended values.
-- **Save to PNG** — drawings are saved to `air_draw_captures/`.
-- **Standalone Windows EXE** — built automatically by GitHub Actions.
+- **Save to PNG** — drawings are saved to the `air_draw_captures/` folder.
+- **Ready-made builds** for Windows, macOS and Linux — no Python required.
 
-## Quick start
+## Download
+
+Grab the latest build for your OS from the [**Releases**](https://github.com/kiberbus/air_draw/releases/latest) page:
+
+| OS | File | How to run |
+| --- | --- | --- |
+| Windows 10/11 (x64) | `AirDraw-windows-x64.exe` | Double-click. If SmartScreen warns, click **More info → Run anyway**. |
+| macOS (Apple Silicon) | `AirDraw-macos-arm64.zip` | Unzip and move `AirDraw.app` to Applications. The app is not notarized, so on first launch right-click it → **Open**, or run `xattr -cr AirDraw.app`. Allow camera access when asked. |
+| Linux (x64) | `AirDraw-linux-x64.tar.gz` | `tar -xzf AirDraw-linux-x64.tar.gz && ./AirDraw`. On Ubuntu/Debian you may need `sudo apt install libxcb-cursor0`. |
+
+Packaged builds keep settings and saved drawings in `~/AirDraw` (`%USERPROFILE%\AirDraw` on Windows).
+
+## Run from source
 
 Requires Python 3.10–3.12 and a webcam.
 
@@ -74,7 +86,7 @@ Letter shortcuts use the physical key position, so they also work with a Cyrilli
 
 ## Configuration
 
-Settings are stored in `config.json` in the project folder. The file is created with recommended defaults on first launch and updated whenever you change something in the app. Delete it to restore the defaults.
+Settings are stored in `config.json` — in the project folder when running from source, or in `~/AirDraw` for packaged builds. The file is created with recommended defaults on first launch and updated whenever you change something in the app. Delete it to restore the defaults.
 
 Key parameters:
 
@@ -115,8 +127,8 @@ air_draw/
 │   ├── test_air_draw.py     # Unit tests
 │   └── verify_full.py       # End-to-end smoke test
 ├── air_draw.spec            # PyInstaller build spec
-├── build_exe.bat            # One-click Windows build
-└── .github/workflows/       # CI: Windows EXE build
+├── build_exe.bat            # One-click local Windows build
+└── .github/workflows/       # CI: builds for Windows, macOS, Linux + releases
 ```
 
 ## Tests
@@ -129,13 +141,25 @@ python -m tests.verify_full
 
 Both run headless (`QT_QPA_PLATFORM=offscreen`). Note that they write recommended settings to `config.json`.
 
-## Building a standalone Windows EXE
+## Building executables
 
-The app is packaged with PyInstaller into a single `AirDraw.exe` that bundles Python, OpenCV, PyQt6 and the MediaPipe models — no installation required on the target PC.
+The app is packaged with [PyInstaller](https://pyinstaller.org) using [`air_draw.spec`](air_draw.spec): a single-file executable on Windows and Linux, and an `.app` bundle on macOS. Builds include Python, OpenCV, PyQt6 and the MediaPipe models.
 
-PyInstaller cannot cross-compile, so a Windows `.exe` must be built on Windows:
+PyInstaller cannot cross-compile, so each OS is built on its own machine. GitHub Actions does this automatically ([`build.yml`](.github/workflows/build.yml)):
 
-- **GitHub Actions (no Windows PC needed):** every push to `main` runs the [Build Windows EXE](.github/workflows/build_windows_exe.yml) workflow. Download `AirDraw.exe` from the run's **Artifacts** section in the **Actions** tab.
-- **Locally on Windows:** double-click `build_exe.bat`. It installs dependencies and produces `dist\AirDraw.exe`.
+- **Every push to `main`** builds all three platforms. Download the files from the run's **Artifacts** section in the **Actions** tab.
+- **Pushing a version tag** publishes a GitHub Release with all three builds attached:
 
-On macOS or Linux, `pyinstaller air_draw.spec` produces a native executable for that platform in `dist/`.
+  ```bash
+  git tag v1.0.0
+  git push origin v1.0.0
+  ```
+
+To build locally for your current OS:
+
+```bash
+pip install pyinstaller
+pyinstaller air_draw.spec --clean --noconfirm
+```
+
+On Windows you can also just double-click `build_exe.bat`.

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -93,9 +94,24 @@ class AppConfig:
         self.palette[str(key)] = [int(bgr[0]), int(bgr[1]), int(bgr[2])]
 
 
+def get_data_dir() -> Path:
+    """
+    Folder for ``config.json`` and saved drawings.
+
+    When running from source this is the project root. In a PyInstaller build
+    the bundle is unpacked to a temporary (or read-only) location, so user data
+    goes to ``~/AirDraw`` instead.
+    """
+    if getattr(sys, "frozen", False):
+        data_dir = Path.home() / "AirDraw"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        return data_dir
+    return Path(__file__).resolve().parent.parent
+
+
 def get_config_path() -> Path:
-    """Path to ``config.json`` in the project root."""
-    return Path(__file__).resolve().parent.parent / CONFIG_FILE_NAME
+    """Path to ``config.json`` inside the data folder."""
+    return get_data_dir() / CONFIG_FILE_NAME
 
 
 def load_config() -> AppConfig:
