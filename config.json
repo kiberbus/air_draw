@@ -1,0 +1,71 @@
+{
+  "language": "ru",
+  "show_shortcuts_on_start": true,
+  "camera_index": 0,
+  "width": 960,
+  "height": 540,
+  "fps_limit": 30,
+  "model_complexity": 0,
+  "detection_confidence": 0.6,
+  "tracking_confidence": 0.6,
+  "detection_scale": 1.0,
+  "draw_pinch_ratio": 17,
+  "clear_pinch_ratio": 17,
+  "smoothing_window": 4,
+  "thickness": 5,
+  "current_color_key": "1",
+  "show_skeleton": true,
+  "show_debug": false,
+  "palette": {
+    "1": [
+      0,
+      255,
+      0
+    ],
+    "2": [
+      0,
+      0,
+      255
+    ],
+    "3": [
+      255,
+      0,
+      0
+    ],
+    "4": [
+      0,
+      255,
+      255
+    ],
+    "5": [
+      255,
+      255,
+      0
+    ],
+    "6": [
+      255,
+      0,
+      255
+    ],
+    "7": [
+      0,
+      165,
+      255
+    ],
+    "8": [
+      255,
+      255,
+      255
+    ],
+    "9": [
+      30,
+      30,
+      30
+    ],
+    "0": [
+      128,
+      128,
+      128
+    ]
+  }
+}

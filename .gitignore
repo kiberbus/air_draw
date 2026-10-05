@@ -1,0 +1,10 @@
+venv/
+venv_build/
+build/
+dist/
+.pyinstaller/
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+air_draw_captures/
