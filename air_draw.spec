@@ -7,11 +7,25 @@ PyInstaller spec for Air Draw.
 
 Build with:  pyinstaller air_draw.spec --clean --noconfirm
 """
+import os
+import re
 import sys
 
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 IS_MACOS = sys.platform == "darwin"
+
+
+def app_version():
+    # CI sets AIR_DRAW_VERSION from the release tag (v1.2.3 -> 1.2.3); otherwise use src/version.py
+    override = os.environ.get("AIR_DRAW_VERSION", "").strip().lstrip("vV")
+    if override:
+        return override
+    with open(os.path.join(SPECPATH, "src", "version.py"), encoding="utf-8") as f:
+        return re.search(r'__version__\s*=\s*"([^"]+)"', f.read()).group(1)
+
+
+APP_VERSION = app_version()
 
 # MediaPipe loads its .tflite models and graphs from package data at runtime
 mediapipe_datas = collect_data_files('mediapipe')
@@ -66,7 +80,8 @@ if IS_MACOS:
         bundle_identifier='com.kiberbus.airdraw',
         info_plist={
             'CFBundleDisplayName': 'Air Draw',
-            'CFBundleShortVersionString': '1.0.0',
+            'CFBundleShortVersionString': APP_VERSION,
+            'CFBundleVersion': APP_VERSION,
             # Without this key macOS denies camera access to the app
             'NSCameraUsageDescription': 'Air Draw uses the camera to track your hand for drawing.',
             'NSHighResolutionCapable': True,

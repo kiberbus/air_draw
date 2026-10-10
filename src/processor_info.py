@@ -10,6 +10,7 @@ import os
 import platform
 import subprocess
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Optional
 
 try:
@@ -38,8 +39,14 @@ class ProcessorInfo:
         return None
 
 
+@lru_cache(maxsize=1)
 def detect_processor() -> ProcessorInfo:
-    """Detect the CPU model, architecture and core counts."""
+    """
+    Detect the CPU model, architecture and core counts.
+
+    The result is cached: the hardware does not change while the app runs, and
+    the macOS lookup spawns a subprocess that should not repeat on every dialog.
+    """
     brand = ""
     system = platform.system()
 
@@ -83,6 +90,14 @@ def detect_processor() -> ProcessorInfo:
             lc = psutil.cpu_count(logical=True)
             if lc:
                 logical_cores = lc
+        except Exception:
+            pass
+
+    # psutil reports CPU usage relative to the previous call; the first call
+    # returns a meaningless 0.0, so take it here and let later readings be real.
+    if psutil is not None:
+        try:
+            psutil.cpu_percent(interval=None)
         except Exception:
             pass
 

@@ -22,3 +22,6 @@ air_draw_captures/
 .DS_Store
 .idea/
 .vscode/
+.ruff_cache/
+config.broken.json
+config.json.tmp

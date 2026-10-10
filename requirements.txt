@@ -1,3 +1,4 @@
+# The app uses the legacy mp.solutions API. Move to MediaPipe Tasks before upgrading.
 mediapipe==0.10.14
 opencv-contrib-python==5.0.0.93
 numpy==2.5.3

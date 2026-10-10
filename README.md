@@ -12,12 +12,13 @@ Hand tracking is done with [MediaPipe Hands](https://ai.google.dev/edge/mediapip
 
 - **Gesture drawing** — pinch thumb and index finger to draw, pinch thumb and middle finger to clear.
 - **Distance-independent gestures** — pinch thresholds scale with the size of your hand, so it works close to or far from the camera.
-- **Smooth strokes** — fingertip position is smoothed with a moving average.
+- **Smooth strokes** — fingertip position is smoothed with a One Euro filter: steady when still, responsive when moving.
+- **Stable pinches** — a pinch stays active until the fingers clearly separate, so strokes do not flicker.
 - **10-color palette** — pick colors with keys `0`–`9`; every color is customizable.
 - **Layout-independent hotkeys** — shortcuts work on English, Russian and Kazakh keyboard layouts.
 - **Localized UI** — English, Russian (Русский) and Kazakh (Қазақша).
 - **Settings dialog** — camera, resolution, FPS limit, MediaPipe model, thresholds, palette; one-click reset to recommended values.
-- **Save to PNG** — drawings are saved to the `air_draw_captures/` folder.
+- **Save to PNG** — drawings are saved to the `air_draw_captures/` folder with a transparent background.
 - **Ready-made builds** for Windows, macOS and Linux — no Python required.
 
 ## Download
@@ -55,8 +56,12 @@ On macOS, allow camera access for your terminal (or IDE) the first time you run 
 | `--width W` / `--height H` | Capture resolution (default `960x540`) |
 | `--fps N` | FPS limit, `0` = unlimited (default `30`) |
 | `--lang ru\|kk\|en` | Interface language |
+| `--save-options` | Also save the values given above to `config.json` |
+| `--version` | Print the version and exit |
 
 Example: `python main.py --camera 1 --lang en`
+
+Values given on the command line apply to that run only and are not written to `config.json`. Settings you change in the app are saved as usual.
 
 ## Controls
 
@@ -82,11 +87,13 @@ Example: `python main.py --camera 1 --lang en`
 | `F1` or `?` | Show shortcuts |
 | `Q` | Quit |
 
-Letter shortcuts use the physical key position, so they also work with a Cyrillic layout active (e.g. `Й` = `Q`, `С` = `C`).
+Letter shortcuts work with Latin and Cyrillic layouts (e.g. `Й` = `Q`, `С` = `C`), so you do not need to switch layouts.
 
 ## Configuration
 
-Settings are stored in `config.json` — in the project folder when running from source, or in `~/AirDraw` for packaged builds. The file is created with recommended defaults on first launch and updated whenever you change something in the app. Delete it to restore the defaults.
+Settings are stored in `config.json` — in the project folder when running from source, or in `~/AirDraw` for packaged builds. The file is created with recommended defaults on first launch. Settings are saved when you close the window or press *Save & Close* in the settings dialog. Delete the file to restore the defaults.
+
+If `config.json` cannot be read, the app keeps a copy as `config.broken.json` and starts with the defaults. Set the `AIR_DRAW_DATA_DIR` environment variable to keep settings and drawings in another folder.
 
 Key parameters:
 
@@ -97,15 +104,16 @@ Key parameters:
 | `fps_limit` | `30` | Camera / render FPS limit (`0` = unlimited) |
 | `model_complexity` | `0` | MediaPipe model: `0` = fast, `1` = accurate |
 | `detection_scale` | `1.0` | Downscale factor for the frame fed to MediaPipe (lower = faster) |
-| `smoothing_window` | `4` | Number of frames used to smooth the fingertip position |
+| `smoothing_min_cutoff` | `1.0` | Fingertip smoothing when the hand is still: lower = steadier, slower to follow |
+| `smoothing_beta` | `0.03` | Fingertip smoothing when the hand moves fast: higher = less lag |
 | `palette` | — | Digit key → color in BGR order |
 
 ## How it works
 
 1. `ThreadedCamera` grabs frames on a background thread so the UI never blocks on the camera.
 2. On every timer tick the frame is mirrored and passed to MediaPipe Hands, which returns 21 hand landmarks.
-3. The hand size is measured as the wrist → middle-finger-knuckle distance. A pinch is detected when the thumb-to-finger distance drops below `hand_size × ratio`.
-4. While drawing, consecutive fingertip positions are connected with anti-aliased lines on a separate canvas.
+3. The hand size is measured as the wrist → middle-finger-knuckle distance. A pinch starts when the thumb-to-finger distance drops below `hand_size × ratio`, and ends only after the fingers move about 25% further apart, so strokes do not flicker.
+4. The fingertip is smoothed with a One Euro filter. While drawing, consecutive positions are connected with anti-aliased lines on a separate canvas.
 5. The canvas is composited over the camera frame using a mask and shown in the window.
 
 ## Project structure
@@ -116,30 +124,42 @@ air_draw/
 ├── src/
 │   ├── camera.py            # Threaded webcam capture
 │   ├── config.py            # Settings, JSON persistence, translations
-│   ├── gestures.py          # Pinch gesture classification
+│   ├── gestures.py          # Pinch gestures, hysteresis, One Euro smoothing
 │   ├── key_mapper.py        # Layout-independent hotkeys
 │   ├── processor_info.py    # CPU detection for the status bar
+│   ├── version.py           # Application version
 │   └── ui/
 │       ├── main_window.py   # Main window and frame pipeline
 │       ├── settings_dialog.py
 │       └── shortcuts_dialog.py
 ├── tests/
+│   ├── support.py           # Shared test setup (temporary data folder, headless Qt)
 │   ├── test_air_draw.py     # Unit tests
 │   └── verify_full.py       # End-to-end smoke test
 ├── air_draw.spec            # PyInstaller build spec
 ├── build_exe.bat            # One-click local Windows build
-└── .github/workflows/       # CI: builds for Windows, macOS, Linux + releases
+├── requirements.txt         # Runtime dependencies
+├── requirements-dev.txt     # Test and lint tools
+├── ruff.toml                # Lint configuration
+└── .github/workflows/       # CI: lint and tests, builds for Windows, macOS, Linux + releases
 ```
 
 ## Tests
 
 ```bash
-pip install pytest
+pip install -r requirements-dev.txt
 pytest tests/test_air_draw.py
 python -m tests.verify_full
 ```
 
-Both run headless (`QT_QPA_PLATFORM=offscreen`). Note that they write recommended settings to `config.json`.
+Both run headless (`QT_QPA_PLATFORM=offscreen`) and use a temporary data folder, so your own `config.json` and drawings are not touched. Lint with:
+
+```bash
+pip install -r requirements-dev.txt
+ruff check .
+```
+
+GitHub Actions runs the same lint and tests on every push and pull request.
 
 ## Building executables
 
@@ -147,8 +167,8 @@ The app is packaged with [PyInstaller](https://pyinstaller.org) using [`air_draw
 
 PyInstaller cannot cross-compile, so each OS is built on its own machine. GitHub Actions does this automatically ([`build.yml`](.github/workflows/build.yml)):
 
-- **Every push to `main`** builds all three platforms. Download the files from the run's **Artifacts** section in the **Actions** tab.
-- **Pushing a version tag** publishes a GitHub Release with all three builds attached:
+- **Every push and pull request** runs lint and tests on Linux. After they pass, the workflow builds all three platforms. On a push to `main`, download the files from the run's **Artifacts** section in the **Actions** tab.
+- **Pushing a version tag** publishes a GitHub Release with all three builds attached. The version in the builds comes from the tag (`v1.2.3` → `1.2.3`); otherwise it comes from `src/version.py`:
 
   ```bash
   git tag v1.0.0

@@ -11,6 +11,7 @@ import logging
 import time
 from collections import deque
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 import cv2
@@ -29,13 +30,8 @@ from PyQt6.QtWidgets import (
 )
 
 from ..camera import ThreadedCamera
-from ..config import AppConfig, get_data_dir, save_config, tr
-from ..gestures import (
-    Gesture,
-    GestureInfo,
-    classify_gesture,
-    smooth_point,
-)
+from ..config import PALETTE_KEYS, AppConfig, clamp_setting, get_data_dir, save_config, tr
+from ..gestures import Gesture, GestureInfo, PointSmoother, classify_gesture
 from ..key_mapper import Action, resolve_qt_key_event
 from ..processor_info import detect_processor
 from .settings_dialog import SettingsDialog
@@ -70,32 +66,45 @@ class MainWindow(QMainWindow):
         )
 
         # Canvas: color strokes plus a mask of painted pixels used for compositing
-        self.width = self.camera.width
-        self.height = self.camera.height
-        self.canvas = np.zeros((self.height, self.width, 3), dtype=np.uint8)
-        self.canvas_mask = np.zeros((self.height, self.width), dtype=np.uint8)
+        self._reset_canvas(self.camera.width, self.camera.height)
 
-        # Fingertip smoothing and the previous stroke point
-        self.smoothing_buffer: deque = deque(maxlen=self.config.smoothing_window)
+        # Fingertip smoothing, the previous stroke point and the last gesture (for pinch hysteresis)
+        self.smoother = self._make_smoother()
         self.prev_point: Optional[Tuple[int, int]] = None
+        self.gesture = Gesture.IDLE
 
         # MediaPipe
         self._init_mediapipe()
 
-        # FPS measurement
+        # FPS measurement, based on new camera frames
         self._frame_times: deque = deque(maxlen=30)
-        self._last_frame_time = time.time()
+        self._last_frame_time = time.monotonic()
         self.current_fps = 0.0
 
         # UI
         self.palette_buttons: Dict[str, QPushButton] = {}
         self._init_ui()
+        self._report_camera_state()
 
         # Frame timer: polls the camera and renders at the configured FPS
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._on_frame_tick)
-        interval_ms = int(1000 / self.config.fps_limit) if self.config.fps_limit > 0 else 16
-        self.timer.start(max(1, interval_ms))
+        self.timer.start(self._frame_interval_ms())
+
+    # ----------------- Setup ----------------- #
+
+    def _make_smoother(self) -> PointSmoother:
+        return PointSmoother(self.config.smoothing_min_cutoff, self.config.smoothing_beta)
+
+    def _frame_interval_ms(self) -> int:
+        return max(1, int(1000 / self.config.fps_limit)) if self.config.fps_limit > 0 else 16
+
+    def _reset_canvas(self, width: int, height: int) -> None:
+        self.frame_width = width
+        self.frame_height = height
+        self.canvas = np.zeros((height, width, 3), dtype=np.uint8)
+        self.canvas_mask = np.zeros((height, width), dtype=np.uint8)
+        self.prev_point = None
 
     def _init_mediapipe(self) -> None:
         self.mp_hands = mp.solutions.hands
@@ -169,7 +178,8 @@ class MainWindow(QMainWindow):
         # 2. Video display
         self.video_label = QLabel(self)
         self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.video_label.setStyleSheet("background-color: #1a1a1a; border-radius: 4px;")
+        self.video_label.setWordWrap(True)
+        self.video_label.setStyleSheet("background-color: #1a1a1a; color: #dddddd; border-radius: 4px;")
         main_layout.addWidget(self.video_label, stretch=1)
 
         # 3. Status bar
@@ -177,11 +187,13 @@ class MainWindow(QMainWindow):
         self.setStatusBar(self.status_bar)
 
         self.status_proc_label = QLabel()
+        self.status_load_label = QLabel()
         self.status_fps_label = QLabel()
         self.status_gesture_label = QLabel()
         self.status_color_label = QLabel()
 
         self.status_bar.addWidget(self.status_proc_label, 2)
+        self.status_bar.addWidget(self.status_load_label, 1)
         self.status_bar.addWidget(self.status_fps_label, 1)
         self.status_bar.addWidget(self.status_gesture_label, 1)
         self.status_bar.addWidget(self.status_color_label, 1)
@@ -189,40 +201,45 @@ class MainWindow(QMainWindow):
         self._update_status_bar(None)
 
     def _build_palette_buttons(self) -> None:
-        """(Re)create the palette buttons, highlighting the active color."""
-        # Remove old buttons
-        for btn in self.palette_buttons.values():
-            btn.deleteLater()
-        self.palette_buttons.clear()
-
-        digits = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"]
-        for d in digits:
-            bgr = self.config.palette.get(d, [0, 255, 0])
-            r, g, b = bgr[2], bgr[1], bgr[0]  # BGR -> RGB for CSS
+        """Create the palette buttons once; their colors are refreshed by ``_refresh_palette_buttons``."""
+        for d in PALETTE_KEYS:
             btn = QPushButton(d)
             btn.setFixedSize(30, 30)
-            is_active = (d == self.config.current_color_key)
-            border = "2px solid white" if is_active else "1px solid #555"
-            btn.setStyleSheet(
-                f"background-color: rgb({r}, {g}, {b}); color: {'#000' if (r+g+b)>400 else '#fff'}; "
-                f"font-weight: bold; border: {border}; border-radius: 4px;"
-            )
             btn.clicked.connect(lambda _, key=d: self._select_color(key))
             self.toolbar_palette_layout.addWidget(btn)
             self.palette_buttons[d] = btn
+        self._refresh_palette_buttons()
+
+    def _refresh_palette_buttons(self) -> None:
+        """Show each button in its palette color, highlighting the active one."""
+        for d, btn in self.palette_buttons.items():
+            bgr = self.config.palette.get(d, [0, 255, 0])
+            r, g, b = bgr[2], bgr[1], bgr[0]  # BGR -> RGB for CSS
+            is_active = d == self.config.current_color_key
+            border = "2px solid white" if is_active else "1px solid #555"
+            btn.setStyleSheet(
+                f"background-color: rgb({r}, {g}, {b}); color: {'#000' if (r + g + b) > 400 else '#fff'}; "
+                f"font-weight: bold; border: {border}; border-radius: 4px;"
+            )
 
     def _select_color(self, key: str) -> None:
         self.config.current_color_key = key
-        self._build_palette_buttons()
+        self._refresh_palette_buttons()
         self._update_status_bar(None)
 
-    def _increase_thickness(self) -> None:
-        self.config.thickness = min(30, self.config.thickness + 1)
+    def _set_thickness(self, value: int) -> None:
+        self.config.thickness = clamp_setting("thickness", value)
         self.lbl_thickness.setText(tr("thickness_label", self.lang, val=self.config.thickness))
 
+    def _increase_thickness(self) -> None:
+        self._set_thickness(self.config.thickness + 1)
+
     def _decrease_thickness(self) -> None:
-        self.config.thickness = max(1, self.config.thickness - 1)
-        self.lbl_thickness.setText(tr("thickness_label", self.lang, val=self.config.thickness))
+        self._set_thickness(self.config.thickness - 1)
+
+    def _nudge_clear_pinch(self, delta: int) -> None:
+        self.config.clear_pinch_ratio = clamp_setting("clear_pinch_ratio", self.config.clear_pinch_ratio + delta)
+        logger.info("Clear threshold: %d", self.config.clear_pinch_ratio)
 
     def _clear_canvas(self) -> None:
         self.canvas[:] = 0
@@ -230,11 +247,26 @@ class MainWindow(QMainWindow):
         self.prev_point = None
         self.status_bar.showMessage(tr("status_cleared", self.lang), 3000)
 
+    def _next_capture_path(self) -> Path:
+        """A new file name per save, with millisecond precision so quick saves never overwrite each other."""
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+        path = self.output_dir / f"drawing_{stamp}.png"
+        n = 1
+        while path.exists():
+            path = self.output_dir / f"drawing_{stamp}_{n}.png"
+            n += 1
+        return path
+
     def _save_canvas(self) -> None:
-        filename = self.output_dir / f"drawing_{datetime.now():%Y%m%d_%H%M%S}.png"
-        cv2.imwrite(str(filename), self.canvas)
-        self.status_bar.showMessage(tr("status_saved", self.lang, filename=filename.name), 4000)
-        logger.info("Canvas saved: %s", filename)
+        """Save the strokes as a PNG with a transparent background (alpha = stroke mask)."""
+        filename = self._next_capture_path()
+        rgba = np.concatenate([self.canvas, self.canvas_mask[:, :, None]], axis=2)
+        if cv2.imwrite(str(filename), rgba):
+            self.status_bar.showMessage(tr("status_saved", self.lang, filename=filename.name), 4000)
+            logger.info("Canvas saved: %s", filename)
+        else:
+            self.status_bar.showMessage(tr("status_save_failed", self.lang, filename=filename.name), 6000)
+            logger.error("Could not write %s", filename)
 
     def _open_settings(self) -> None:
         dlg = SettingsDialog(self.config, self)
@@ -257,43 +289,48 @@ class MainWindow(QMainWindow):
         self.btn_shortcuts.setText(tr("btn_open_shortcuts", self.lang))
         self.lbl_thickness.setText(tr("thickness_label", self.lang, val=self.config.thickness))
 
-        # Camera (reopened only if index/resolution changed)
+        # Camera (reopened only if index/resolution changed or it is not running)
         self.camera.update_settings(
             camera_index=self.config.camera_index,
             width=self.config.width,
             height=self.config.height,
             fps_limit=self.config.fps_limit,
         )
-        if (self.camera.width != self.width) or (self.camera.height != self.height):
-            self.width = self.camera.width
-            self.height = self.camera.height
-            self.canvas = np.zeros((self.height, self.width, 3), dtype=np.uint8)
-            self.canvas_mask = np.zeros((self.height, self.width), dtype=np.uint8)
+        if (self.camera.width != self.frame_width) or (self.camera.height != self.frame_height):
+            self._reset_canvas(self.camera.width, self.camera.height)
 
         # Frame timer interval
-        interval_ms = int(1000 / self.config.fps_limit) if self.config.fps_limit > 0 else 16
-        self.timer.setInterval(max(1, interval_ms))
+        self.timer.setInterval(self._frame_interval_ms())
 
-        # Recreate MediaPipe Hands with the new model parameters
+        # Recreate MediaPipe Hands and the smoother with the new parameters
         self.hands.close()
         self._init_mediapipe()
+        self.smoother = self._make_smoother()
+        self.gesture = Gesture.IDLE
 
-        # Smoothing window
-        self.smoothing_buffer = deque(maxlen=self.config.smoothing_window)
-
-        # Palette buttons
-        self._build_palette_buttons()
+        self._refresh_palette_buttons()
+        self._report_camera_state()
         self._update_status_bar(None)
+
+    def _report_camera_state(self) -> None:
+        """Tell the user when no camera is running, instead of showing an empty window."""
+        if self.camera.is_opened():
+            self.video_label.setText("")
+            return
+        message = tr("camera_error", self.lang, index=self.camera.camera_index)
+        self.video_label.setText(message)
+        self.status_bar.showMessage(message)
 
     # ----------------- Frame processing ----------------- #
 
     def _on_frame_tick(self) -> None:
-        """Process and display one camera frame."""
+        """Process and display one new camera frame."""
         ok, frame = self.camera.read()
         if not ok or frame is None:
+            # No new frame yet: the camera is still starting or this tick repeats the last one
             return
 
-        now = time.time()
+        now = time.monotonic()
         dt = now - self._last_frame_time
         self._last_frame_time = now
         self._frame_times.append(dt)
@@ -305,14 +342,11 @@ class MainWindow(QMainWindow):
 
         # Keep the canvas the same size as the frame
         fh, fw = frame.shape[:2]
-        if fw != self.width or fh != self.height:
-            self.width = fw
-            self.height = fh
-            self.canvas = cv2.resize(self.canvas, (fw, fh))
-            self.canvas_mask = cv2.resize(self.canvas_mask, (fw, fh))
+        if fw != self.frame_width or fh != self.frame_height:
+            self._reset_canvas(fw, fh)
 
         # Hand tracking and gesture-driven drawing
-        info = self._process_hand(frame)
+        info = self._process_hand(frame, dt)
 
         # Fingertip marker, gesture label and debug info
         self._render_overlay(frame, info)
@@ -326,7 +360,7 @@ class MainWindow(QMainWindow):
         # Refresh the status bar
         self._update_status_bar(info)
 
-    def _process_hand(self, frame: np.ndarray) -> Optional[GestureInfo]:
+    def _process_hand(self, frame: np.ndarray, dt: float) -> Optional[GestureInfo]:
         """
         Run MediaPipe on ``frame``, classify the gesture and update the canvas.
 
@@ -345,7 +379,11 @@ class MainWindow(QMainWindow):
         results = self.hands.process(rgb)
 
         if not results.multi_hand_landmarks:
+            # Hand lost: end the stroke and forget old positions so the next
+            # appearance does not start from a stale, averaged point
             self.prev_point = None
+            self.smoother.reset()
+            self.gesture = Gesture.IDLE
             return None
 
         landmarks = results.multi_hand_landmarks[0].landmark
@@ -361,12 +399,14 @@ class MainWindow(QMainWindow):
 
         info = classify_gesture(
             landmarks,
-            self.width,
-            self.height,
+            self.frame_width,
+            self.frame_height,
             draw_ratio=self.config.draw_pinch_float,
             clear_ratio=self.config.clear_pinch_float,
+            previous=self.gesture,
         )
-        point = smooth_point(self.smoothing_buffer, info.point)
+        self.gesture = info.gesture
+        point = self.smoother.update(info.point, dt)
         info.point = point
 
         active_color = self.config.get_color_bgr()
@@ -420,7 +460,7 @@ class MainWindow(QMainWindow):
             Gesture.IDLE: tr("status_idle", self.lang),
         }[gesture]
         cv2.putText(
-            frame, label, (12, self.height - 20),
+            frame, label, (12, self.frame_height - 20),
             cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2, cv2.LINE_AA,
         )
 
@@ -432,7 +472,7 @@ class MainWindow(QMainWindow):
             ]
             for i, text in enumerate(lines):
                 cv2.putText(
-                    frame, text, (12, self.height - 55 - 24 * i),
+                    frame, text, (12, self.frame_height - 55 - 24 * i),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2, cv2.LINE_AA,
                 )
 
@@ -444,29 +484,38 @@ class MainWindow(QMainWindow):
         return cv2.add(background, foreground)
 
     def _display_frame(self, frame: np.ndarray) -> None:
+        target = self.video_label.size()
+        if target.width() <= 0 or target.height() <= 0:
+            return  # The label has not been laid out yet
+
+        # Scale to the label size, keeping the aspect ratio. OpenCV is much
+        # cheaper than scaling a QPixmap with smooth filtering on every frame.
+        h, w = frame.shape[:2]
+        scale = min(target.width() / w, target.height() / h)
+        new_w, new_h = max(1, int(w * scale)), max(1, int(h * scale))
+        if (new_w, new_h) != (w, h):
+            interpolation = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
+            frame = cv2.resize(frame, (new_w, new_h), interpolation=interpolation)
+
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb.shape
-        bytes_per_line = ch * w
-        q_img = QImage(rgb.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
-
-        # Scale to the QLabel size, keeping the aspect ratio
-        target_size = self.video_label.size()
-        pixmap = QPixmap.fromImage(q_img).scaled(
-            target_size,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        self.video_label.setPixmap(pixmap)
+        q_img = QImage(rgb.data, w, h, ch * w, QImage.Format.Format_RGB888)
+        # fromImage copies the pixels, so the numpy buffer may be reused afterwards
+        self.video_label.setPixmap(QPixmap.fromImage(q_img))
 
     def _update_status_bar(self, info: Optional[GestureInfo]) -> None:
         # CPU
         cpu_load = self.proc_info.get_cpu_load()
-        load_s = f" | CPU: {cpu_load:.0f}%" if cpu_load is not None else ""
-        self.status_proc_label.setText(f"CPU: {self.proc_info.brand} ({self.proc_info.logical_cores} cores{load_s})")
+        self.status_proc_label.setText(
+            tr("bar_proc", self.lang, brand=self.proc_info.brand, cores=self.proc_info.logical_cores)
+        )
+        self.status_load_label.setText(
+            tr("bar_load", self.lang, load=f"{cpu_load:.0f}") if cpu_load is not None else ""
+        )
 
         # FPS
-        target_fps = f"/{self.config.fps_limit}" if self.config.fps_limit > 0 else ""
-        self.status_fps_label.setText(f"FPS: {self.current_fps:.0f}{target_fps}")
+        target = f"/{self.config.fps_limit}" if self.config.fps_limit > 0 else ""
+        self.status_fps_label.setText(tr("bar_fps", self.lang, fps=f"{self.current_fps:.0f}", target=target))
 
         # Gesture
         gesture_name = tr("status_idle", self.lang)
@@ -478,9 +527,7 @@ class MainWindow(QMainWindow):
         self.status_gesture_label.setText(tr("gesture_label", self.lang, name=gesture_name))
 
         # Active color
-        self.status_color_label.setText(
-            f"{tr('current_color_label', self.lang, key=self.config.current_color_key)}"
-        )
+        self.status_color_label.setText(tr("current_color_label", self.lang, key=self.config.current_color_key))
 
     # ----------------- Keyboard handling ----------------- #
 
@@ -490,6 +537,7 @@ class MainWindow(QMainWindow):
             super().keyPressEvent(event)
             return
 
+        # Toggles are kept in memory and written to config.json when the window closes
         if action is Action.QUIT:
             self.close()
         elif action is Action.CLEAR_CANVAS:
@@ -504,18 +552,12 @@ class MainWindow(QMainWindow):
             self._decrease_thickness()
         elif action is Action.TOGGLE_DEBUG:
             self.config.show_debug = not self.config.show_debug
-            save_config(self.config)
         elif action is Action.TOGGLE_SKELETON:
             self.config.show_skeleton = not self.config.show_skeleton
-            save_config(self.config)
         elif action is Action.CLEAR_PINCH_DEC:
-            self.config.clear_pinch_ratio = max(5, self.config.clear_pinch_ratio - 1)
-            save_config(self.config)
-            logger.info("Clear threshold: %d", self.config.clear_pinch_ratio)
+            self._nudge_clear_pinch(-1)
         elif action is Action.CLEAR_PINCH_INC:
-            self.config.clear_pinch_ratio = min(50, self.config.clear_pinch_ratio + 1)
-            save_config(self.config)
-            logger.info("Clear threshold: %d", self.config.clear_pinch_ratio)
+            self._nudge_clear_pinch(+1)
         elif action is Action.OPEN_SETTINGS:
             self._open_settings()
         elif action is Action.OPEN_SHORTCUTS:

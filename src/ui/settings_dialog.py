@@ -28,8 +28,31 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ..config import AppConfig, get_recommended_config, save_config, tr
+from ..config import PALETTE_KEYS, RANGES, AppConfig, get_recommended_config, save_config, tr
 from ..processor_info import detect_processor
+
+
+def _select_data(combo: QComboBox, data, label: str) -> None:
+    """
+    Select the item whose data equals ``data``. A value that is not in the list
+    (for example a custom resolution from config.json) is added, so it is never lost.
+    """
+    for i in range(combo.count()):
+        if combo.itemData(i) == data:
+            combo.setCurrentIndex(i)
+            return
+    combo.addItem(label, data)
+    combo.setCurrentIndex(combo.count() - 1)
+
+
+def _int_range(name: str) -> tuple[int, int]:
+    low, high = RANGES[name]
+    return int(low), int(high)
+
+
+def _float_range(name: str) -> tuple[float, float]:
+    low, high = RANGES[name]
+    return float(low), float(high)
 
 
 class SettingsDialog(QDialog):
@@ -156,7 +179,7 @@ class SettingsDialog(QDialog):
 
         # Camera index
         self.spin_cam_idx = QSpinBox()
-        self.spin_cam_idx.setRange(0, 10)
+        self.spin_cam_idx.setRange(*_int_range("camera_index"))
         self.spin_cam_idx.setValue(self.config.camera_index)
         form.addRow(tr("camera_index_label", self.lang), self.spin_cam_idx)
 
@@ -164,21 +187,13 @@ class SettingsDialog(QDialog):
         self.combo_res = QComboBox()
         self.combo_res.addItem("640 x 480", (640, 480))
         self.combo_res.addItem(f"960 x 540 {tr('recommended_suffix', self.lang)}", (960, 540))
-        self.combo_res.addItem("1280 x 720 (HD)", (1280, 720))
-        self.combo_res.addItem("1920 x 1080 (Full HD)", (1920, 1080))
-
-        current_res = (self.config.width, self.config.height)
-        found_res = False
-        for i in range(self.combo_res.count()):
-            if self.combo_res.itemData(i) == current_res:
-                self.combo_res.setCurrentIndex(i)
-                found_res = True
-                break
-        if not found_res:
-            # Custom resolution from config.json — add it so it is not lost
-            self.combo_res.addItem(f"{current_res[0]} x {current_res[1]}", current_res)
-            self.combo_res.setCurrentIndex(self.combo_res.count() - 1)
-
+        self.combo_res.addItem(f"1280 x 720 ({tr('res_hd', self.lang)})", (1280, 720))
+        self.combo_res.addItem(f"1920 x 1080 ({tr('res_fhd', self.lang)})", (1920, 1080))
+        _select_data(
+            self.combo_res,
+            (self.config.width, self.config.height),
+            f"{self.config.width} x {self.config.height}",
+        )
         form.addRow(tr("camera_resolution_label", self.lang), self.combo_res)
 
         # FPS limit
@@ -189,17 +204,7 @@ class SettingsDialog(QDialog):
         self.combo_fps.addItem(f"30 FPS {tr('recommended_suffix', self.lang)}", 30)
         self.combo_fps.addItem("60 FPS", 60)
         self.combo_fps.addItem(tr("fps_unlimited", self.lang), 0)
-
-        found_fps = False
-        for i in range(self.combo_fps.count()):
-            if self.combo_fps.itemData(i) == self.config.fps_limit:
-                self.combo_fps.setCurrentIndex(i)
-                found_fps = True
-                break
-        if not found_fps:
-            self.combo_fps.addItem(f"{self.config.fps_limit} FPS", self.config.fps_limit)
-            self.combo_fps.setCurrentIndex(self.combo_fps.count() - 1)
-
+        _select_data(self.combo_fps, self.config.fps_limit, f"{self.config.fps_limit} FPS")
         form.addRow(tr("fps_limit_label", self.lang), self.combo_fps)
 
         # MediaPipe model complexity (0 = fast, 1 = accurate)
@@ -213,20 +218,20 @@ class SettingsDialog(QDialog):
 
         # Detection frame scale
         self.spin_scale = QDoubleSpinBox()
-        self.spin_scale.setRange(0.25, 1.0)
+        self.spin_scale.setRange(*_float_range("detection_scale"))
         self.spin_scale.setSingleStep(0.1)
         self.spin_scale.setValue(self.config.detection_scale)
         form.addRow(tr("detection_scale_label", self.lang), self.spin_scale)
 
         # Detection / tracking confidence
         self.spin_det_conf = QDoubleSpinBox()
-        self.spin_det_conf.setRange(0.1, 1.0)
+        self.spin_det_conf.setRange(*_float_range("detection_confidence"))
         self.spin_det_conf.setSingleStep(0.05)
         self.spin_det_conf.setValue(self.config.detection_confidence)
         form.addRow(tr("detection_conf_label", self.lang), self.spin_det_conf)
 
         self.spin_track_conf = QDoubleSpinBox()
-        self.spin_track_conf.setRange(0.1, 1.0)
+        self.spin_track_conf.setRange(*_float_range("tracking_confidence"))
         self.spin_track_conf.setSingleStep(0.05)
         self.spin_track_conf.setValue(self.config.tracking_confidence)
         form.addRow(tr("tracking_conf_label", self.lang), self.spin_track_conf)
@@ -241,21 +246,30 @@ class SettingsDialog(QDialog):
 
         # Draw pinch ratio (recommended: 17)
         self.spin_draw_pinch = QSpinBox()
-        self.spin_draw_pinch.setRange(5, 50)
+        self.spin_draw_pinch.setRange(*_int_range("draw_pinch_ratio"))
         self.spin_draw_pinch.setValue(self.config.draw_pinch_ratio)
         form.addRow(tr("draw_pinch_label", self.lang), self.spin_draw_pinch)
 
         # Clear pinch ratio (recommended: 17)
         self.spin_clear_pinch = QSpinBox()
-        self.spin_clear_pinch.setRange(5, 50)
+        self.spin_clear_pinch.setRange(*_int_range("clear_pinch_ratio"))
         self.spin_clear_pinch.setValue(self.config.clear_pinch_ratio)
         form.addRow(tr("clear_pinch_label", self.lang), self.spin_clear_pinch)
 
-        # Smoothing window
-        self.spin_smoothing = QSpinBox()
-        self.spin_smoothing.setRange(1, 15)
-        self.spin_smoothing.setValue(self.config.smoothing_window)
-        form.addRow(tr("smoothing_label", self.lang), self.spin_smoothing)
+        # Fingertip smoothing (One Euro filter)
+        self.spin_smooth_cutoff = QDoubleSpinBox()
+        self.spin_smooth_cutoff.setRange(*_float_range("smoothing_min_cutoff"))
+        self.spin_smooth_cutoff.setDecimals(2)
+        self.spin_smooth_cutoff.setSingleStep(0.1)
+        self.spin_smooth_cutoff.setValue(self.config.smoothing_min_cutoff)
+        form.addRow(tr("smoothing_cutoff_label", self.lang), self.spin_smooth_cutoff)
+
+        self.spin_smooth_beta = QDoubleSpinBox()
+        self.spin_smooth_beta.setRange(*_float_range("smoothing_beta"))
+        self.spin_smooth_beta.setDecimals(3)
+        self.spin_smooth_beta.setSingleStep(0.005)
+        self.spin_smooth_beta.setValue(self.config.smoothing_beta)
+        form.addRow(tr("smoothing_beta_label", self.lang), self.spin_smooth_beta)
 
         # Hand skeleton
         self.chk_skeleton = QCheckBox(tr("show_skeleton_label", self.lang))
@@ -283,8 +297,7 @@ class SettingsDialog(QDialog):
         scroll_content = QWidget()
         scroll_layout = QVBoxLayout(scroll_content)
 
-        digits = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"]
-        for d in digits:
+        for d in PALETTE_KEYS:
             row_layout = QHBoxLayout()
 
             lbl = QLabel(tr("key_num_label", self.lang, num=d))
@@ -339,20 +352,11 @@ class SettingsDialog(QDialog):
         )
         if reply == QMessageBox.StandardButton.Yes:
             rec = get_recommended_config()
-            # Only the widgets are updated; nothing is saved until "Save & Close"
+            # Only the widgets are updated; nothing is saved until "Save & Close".
+            # The interface language is deliberately left as it is.
             self.spin_cam_idx.setValue(rec.camera_index)
-
-            # Resolution
-            for i in range(self.combo_res.count()):
-                if self.combo_res.itemData(i) == (rec.width, rec.height):
-                    self.combo_res.setCurrentIndex(i)
-                    break
-
-            # FPS
-            for i in range(self.combo_fps.count()):
-                if self.combo_fps.itemData(i) == rec.fps_limit:
-                    self.combo_fps.setCurrentIndex(i)
-                    break
+            _select_data(self.combo_res, (rec.width, rec.height), f"{rec.width} x {rec.height}")
+            _select_data(self.combo_fps, rec.fps_limit, f"{rec.fps_limit} FPS")
 
             # Model and detection parameters
             self.combo_model.setCurrentIndex(self.combo_model.findData(rec.model_complexity))
@@ -360,10 +364,11 @@ class SettingsDialog(QDialog):
             self.spin_det_conf.setValue(rec.detection_confidence)
             self.spin_track_conf.setValue(rec.tracking_confidence)
 
-            # Gesture thresholds
+            # Gesture thresholds and smoothing
             self.spin_draw_pinch.setValue(rec.draw_pinch_ratio)
             self.spin_clear_pinch.setValue(rec.clear_pinch_ratio)
-            self.spin_smoothing.setValue(rec.smoothing_window)
+            self.spin_smooth_cutoff.setValue(rec.smoothing_min_cutoff)
+            self.spin_smooth_beta.setValue(rec.smoothing_beta)
 
             self.chk_skeleton.setChecked(rec.show_skeleton)
             self.chk_debug.setChecked(rec.show_debug)
@@ -377,9 +382,11 @@ class SettingsDialog(QDialog):
 
     # ----------------- Save ----------------- #
     def _on_save(self) -> None:
+        # Saving stores every value shown here, so command-line overrides end with this save
+        self.config.session_overrides = frozenset()
+
         # Copy widget values into the config
-        new_lang = self.combo_lang.currentData()
-        self.config.language = new_lang
+        self.config.language = self.combo_lang.currentData()
         self.config.show_shortcuts_on_start = self.chk_startup.isChecked()
         self.config.camera_index = self.spin_cam_idx.value()
 
@@ -395,10 +402,11 @@ class SettingsDialog(QDialog):
         self.config.detection_confidence = self.spin_det_conf.value()
         self.config.tracking_confidence = self.spin_track_conf.value()
 
-        # Pinch thresholds
+        # Pinch thresholds and smoothing
         self.config.draw_pinch_ratio = self.spin_draw_pinch.value()
         self.config.clear_pinch_ratio = self.spin_clear_pinch.value()
-        self.config.smoothing_window = self.spin_smoothing.value()
+        self.config.smoothing_min_cutoff = self.spin_smooth_cutoff.value()
+        self.config.smoothing_beta = self.spin_smooth_beta.value()
 
         self.config.show_skeleton = self.chk_skeleton.isChecked()
         self.config.show_debug = self.chk_debug.isChecked()

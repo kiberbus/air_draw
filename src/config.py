@@ -1,54 +1,70 @@
 """
 Air Draw configuration: default settings, JSON persistence and
 UI localization (Russian, Kazakh, English).
+
+Defaults live in one place (``AppConfig``). Loading tolerates hand-edited or
+older files: unknown keys are ignored, invalid values fall back to defaults and
+numeric values are clamped to ``RANGES``.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import math
+import os
+import shutil
 import sys
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, FrozenSet, List, Optional, Tuple
 
 logger = logging.getLogger("air_draw.config")
 
 CONFIG_FILE_NAME = "config.json"
+# Overrides the data folder. The test suite uses it so runs never touch real settings.
+DATA_DIR_ENV = "AIR_DRAW_DATA_DIR"
 
-# Recommended defaults. Pinch ratios are stored as integer percentages of the
-# hand size (17 -> 0.17); 17 and 30 FPS are the tuned recommended values.
-RECOMMENDED_DEFAULTS = {
-    "language": "ru",
-    "show_shortcuts_on_start": True,
-    "camera_index": 0,
-    "width": 960,
-    "height": 540,
-    "fps_limit": 30,
-    "model_complexity": 0,
-    "detection_confidence": 0.6,
-    "tracking_confidence": 0.6,
-    "detection_scale": 1.0,
-    "draw_pinch_ratio": 17,
-    "clear_pinch_ratio": 17,
-    "smoothing_window": 4,
-    "thickness": 5,
-    "current_color_key": "1",
-    "show_skeleton": True,
-    "show_debug": False,
-    "palette": {  # Digit key -> brush color in BGR order (OpenCV)
-        "1": [0, 255, 0],     # Green
-        "2": [0, 0, 255],     # Red
-        "3": [255, 0, 0],     # Blue
-        "4": [0, 255, 255],   # Yellow
-        "5": [255, 255, 0],   # Cyan
-        "6": [255, 0, 255],   # Magenta
-        "7": [0, 165, 255],   # Orange
-        "8": [255, 255, 255], # White
-        "9": [30, 30, 30],    # Near black
-        "0": [128, 128, 128], # Gray
-    },
+LANGUAGES = ("ru", "kk", "en")
+# Palette keys in toolbar order: digits 1-9, then 0
+PALETTE_KEYS = ("1", "2", "3", "4", "5", "6", "7", "8", "9", "0")
+
+# Digit key -> brush color in BGR order (OpenCV)
+DEFAULT_PALETTE_BGR: Dict[str, List[int]] = {
+    "1": [0, 255, 0],       # Green
+    "2": [0, 0, 255],       # Red
+    "3": [255, 0, 0],       # Blue
+    "4": [0, 255, 255],     # Yellow
+    "5": [255, 255, 0],     # Cyan
+    "6": [255, 0, 255],     # Magenta
+    "7": [0, 165, 255],     # Orange
+    "8": [255, 255, 255],   # White
+    "9": [30, 30, 30],      # Near black
+    "0": [128, 128, 128],   # Gray
 }
+
+# Allowed ranges for numeric settings. Stored and command-line values are clamped
+# to these, and the settings dialog uses the same limits, so the UI never changes
+# a stored value silently.
+RANGES: Dict[str, Tuple[float, float]] = {
+    "width": (160, 3840),
+    "height": (120, 2160),
+    "camera_index": (0, 99),
+    "fps_limit": (0, 120),
+    "model_complexity": (0, 1),
+    "detection_confidence": (0.1, 1.0),
+    "tracking_confidence": (0.1, 1.0),
+    "detection_scale": (0.25, 1.0),
+    "draw_pinch_ratio": (5, 50),
+    "clear_pinch_ratio": (5, 50),
+    "smoothing_min_cutoff": (0.1, 10.0),
+    "smoothing_beta": (0.0, 1.0),
+    "thickness": (1, 30),
+}
+
+
+def _default_palette() -> Dict[str, List[int]]:
+    return {k: list(v) for k, v in DEFAULT_PALETTE_BGR.items()}
 
 
 @dataclass
@@ -67,13 +83,18 @@ class AppConfig:
     detection_scale: float = 1.0  # Downscale factor for the frame fed to MediaPipe
     draw_pinch_ratio: int = 17   # Percent of hand size
     clear_pinch_ratio: int = 17  # Percent of hand size
-    smoothing_window: int = 4  # Moving-average window, in frames
+    # One Euro filter on the fingertip: lower cutoff = smoother but laggier;
+    # higher beta = less lag during fast movement
+    smoothing_min_cutoff: float = 1.0
+    smoothing_beta: float = 0.03
     thickness: int = 5
     current_color_key: str = "1"
     show_skeleton: bool = True
     show_debug: bool = False
-    palette: Dict[str, List[int]] = field(
-        default_factory=lambda: dict(RECOMMENDED_DEFAULTS["palette"])
+    palette: Dict[str, List[int]] = field(default_factory=_default_palette)
+    # Settings overridden by command-line flags for this run only; never written to disk
+    session_overrides: FrozenSet[str] = field(
+        default_factory=frozenset, compare=False, repr=False, metadata={"persist": False}
     )
 
     @property
@@ -94,14 +115,47 @@ class AppConfig:
         self.palette[str(key)] = [int(bgr[0]), int(bgr[1]), int(bgr[2])]
 
 
+_DEFAULTS = AppConfig()
+
+
+def get_recommended_config() -> AppConfig:
+    """Return a fresh config with the recommended settings (pinch 17, 30 FPS)."""
+    return AppConfig()
+
+
+def clamp_setting(name: str, value: Any) -> Any:
+    """Clamp a numeric setting to ``RANGES``; other values pass through unchanged."""
+    if name not in RANGES:
+        return value
+    low, high = RANGES[name]
+    clamped = min(max(value, low), high)
+    return int(round(clamped)) if isinstance(getattr(_DEFAULTS, name), int) else float(clamped)
+
+
+def apply_overrides(cfg: AppConfig, overrides: Dict[str, Any]) -> None:
+    """Apply run-only settings (command-line flags). They are not written back to disk."""
+    for name, value in overrides.items():
+        setattr(cfg, name, clamp_setting(name, value))
+    cfg.session_overrides = cfg.session_overrides | frozenset(overrides)
+
+
+# --------------------------------------------------------------------------- #
+# Paths and persistence
+# --------------------------------------------------------------------------- #
+
 def get_data_dir() -> Path:
     """
     Folder for ``config.json`` and saved drawings.
 
-    When running from source this is the project root. In a PyInstaller build
-    the bundle is unpacked to a temporary (or read-only) location, so user data
-    goes to ``~/AirDraw`` instead.
+    Honors ``AIR_DRAW_DATA_DIR`` if set. When running from source this is the
+    project root. In a PyInstaller build the bundle is unpacked to a temporary
+    (or read-only) location, so user data goes to ``~/AirDraw`` instead.
     """
+    override = os.environ.get(DATA_DIR_ENV)
+    if override:
+        data_dir = Path(override).expanduser()
+        data_dir.mkdir(parents=True, exist_ok=True)
+        return data_dir
     if getattr(sys, "frozen", False):
         data_dir = Path.home() / "AirDraw"
         data_dir.mkdir(parents=True, exist_ok=True)
@@ -114,6 +168,100 @@ def get_config_path() -> Path:
     return get_data_dir() / CONFIG_FILE_NAME
 
 
+def _read_json_object(path: Path) -> Dict[str, Any]:
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise ValueError("config must be a JSON object")
+    return data
+
+
+def _is_bgr(color: Any) -> bool:
+    return (
+        isinstance(color, list)
+        and len(color) == 3
+        and all(isinstance(c, int) and not isinstance(c, bool) and 0 <= c <= 255 for c in color)
+    )
+
+
+def _sanitize_palette(raw: Any) -> Dict[str, List[int]]:
+    """Merge a stored palette over the defaults, dropping invalid entries."""
+    palette = _default_palette()
+    if not isinstance(raw, dict):
+        return palette
+    for key, color in raw.items():
+        if key not in PALETTE_KEYS:
+            logger.warning("Ignoring palette entry for unknown key %r", key)
+        elif _is_bgr(color):
+            palette[key] = list(color)
+        else:
+            logger.warning("Ignoring invalid palette color for key %s: %r", key, color)
+    return palette
+
+
+def _coerce(name: str, value: Any, default: Any) -> Any:
+    """Convert a JSON value to the type of its default. Raises ``ValueError`` if impossible."""
+    if isinstance(default, bool):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in ("1", "true", "yes", "on")
+        if isinstance(value, (int, float)):
+            return bool(value)
+        raise ValueError("expected true or false")
+    if isinstance(default, (int, float)):
+        if isinstance(value, bool):
+            raise ValueError("expected a number")
+        number = float(value)  # Accepts "12" and 12.0, raises for other input
+        if not math.isfinite(number):
+            raise ValueError("expected a finite number")
+        return clamp_setting(name, number)
+    if isinstance(default, str):
+        if not isinstance(value, str):
+            raise ValueError("expected a string")
+        return value
+    raise ValueError(f"unsupported setting type for {name}")
+
+
+def config_from_dict(raw: Dict[str, Any]) -> AppConfig:
+    """Build a config from parsed JSON, tolerating unknown keys and invalid values."""
+    defaults = get_recommended_config()
+    values: Dict[str, Any] = {}
+    for f in fields(AppConfig):
+        if not f.metadata.get("persist", True) or f.name == "palette" or f.name not in raw:
+            continue
+        try:
+            values[f.name] = _coerce(f.name, raw[f.name], getattr(defaults, f.name))
+        except (TypeError, ValueError) as e:
+            logger.warning("Ignoring invalid value for %s (%r): %s", f.name, raw[f.name], e)
+
+    cfg = replace(defaults, **values)
+    cfg.palette = _sanitize_palette(raw.get("palette"))
+    if cfg.language not in LANGUAGES:
+        cfg.language = "ru"
+    if cfg.current_color_key not in PALETTE_KEYS:
+        cfg.current_color_key = "1"
+    return cfg
+
+
+def _keep_broken_copy(path: Path) -> Optional[Path]:
+    """Copy an unreadable config aside so the user can recover it."""
+    backup = path.with_name(f"{path.stem}.broken{path.suffix}")
+    try:
+        shutil.copy2(path, backup)
+        return backup
+    except OSError as e:
+        logger.error("Could not keep a copy of the broken config: %s", e)
+        return None
+
+
+def _read_stored_values(path: Path) -> Dict[str, Any]:
+    try:
+        return _read_json_object(path)
+    except (OSError, ValueError):
+        return {}
+
+
 def load_config() -> AppConfig:
     """Load settings from disk, creating the file with defaults if missing."""
     config_file = get_config_path()
@@ -124,76 +272,36 @@ def load_config() -> AppConfig:
         return cfg
 
     try:
-        with open(config_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        # Merge over the defaults so configs from older versions still load
-        merged = dict(RECOMMENDED_DEFAULTS)
-        merged.update(data)
-        if "palette" in data and isinstance(data["palette"], dict):
-            p = dict(RECOMMENDED_DEFAULTS["palette"])
-            p.update(data["palette"])
-            merged["palette"] = p
-
-        # Coerce types in case the file was edited by hand
-        return AppConfig(
-            language=str(merged.get("language", "ru")),
-            show_shortcuts_on_start=bool(merged.get("show_shortcuts_on_start", True)),
-            camera_index=int(merged.get("camera_index", 0)),
-            width=int(merged.get("width", 960)),
-            height=int(merged.get("height", 540)),
-            fps_limit=int(merged.get("fps_limit", 30)),
-            model_complexity=int(merged.get("model_complexity", 0)),
-            detection_confidence=float(merged.get("detection_confidence", 0.6)),
-            tracking_confidence=float(merged.get("tracking_confidence", 0.6)),
-            detection_scale=float(merged.get("detection_scale", 1.0)),
-            draw_pinch_ratio=int(merged.get("draw_pinch_ratio", 17)),
-            clear_pinch_ratio=int(merged.get("clear_pinch_ratio", 17)),
-            smoothing_window=int(merged.get("smoothing_window", 4)),
-            thickness=int(merged.get("thickness", 5)),
-            current_color_key=str(merged.get("current_color_key", "1")),
-            show_skeleton=bool(merged.get("show_skeleton", True)),
-            show_debug=bool(merged.get("show_debug", False)),
-            palette=dict(merged.get("palette", RECOMMENDED_DEFAULTS["palette"])),
-        )
-    except Exception as e:
-        logger.error(f"Failed to load config: {e}. Falling back to recommended settings.")
+        raw = _read_json_object(config_file)
+    except (OSError, ValueError) as e:
+        backup = _keep_broken_copy(config_file)
+        logger.error("Failed to read config (%s). Using recommended settings; copy kept at %s", e, backup)
         return get_recommended_config()
+    return config_from_dict(raw)
 
 
 def save_config(cfg: AppConfig) -> None:
-    """Write settings to ``config.json``."""
+    """Write settings to ``config.json`` atomically (temp file, then replace)."""
     config_file = get_config_path()
+    data = {f.name: getattr(cfg, f.name) for f in fields(AppConfig) if f.metadata.get("persist", True)}
+
+    # Settings overridden for this run keep whatever is already stored on disk
+    if cfg.session_overrides:
+        stored = _read_stored_values(config_file)
+        for name in cfg.session_overrides:
+            if name in stored:
+                data[name] = stored[name]
+            else:
+                data.pop(name, None)
+
+    tmp_file = config_file.with_name(config_file.name + ".tmp")
     try:
-        data = asdict(cfg)
-        with open(config_file, "w", encoding="utf-8") as f:
+        with open(tmp_file, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
+        os.replace(tmp_file, config_file)
         logger.info("Config saved to %s", config_file)
-    except Exception as e:
+    except OSError as e:
         logger.error("Failed to save config: %s", e)
-
-
-def get_recommended_config() -> AppConfig:
-    """Return a fresh config with the recommended settings (pinch 17, 30 FPS)."""
-    return AppConfig(
-        language=RECOMMENDED_DEFAULTS["language"],
-        show_shortcuts_on_start=RECOMMENDED_DEFAULTS["show_shortcuts_on_start"],
-        camera_index=RECOMMENDED_DEFAULTS["camera_index"],
-        width=RECOMMENDED_DEFAULTS["width"],
-        height=RECOMMENDED_DEFAULTS["height"],
-        fps_limit=RECOMMENDED_DEFAULTS["fps_limit"],
-        model_complexity=RECOMMENDED_DEFAULTS["model_complexity"],
-        detection_confidence=RECOMMENDED_DEFAULTS["detection_confidence"],
-        tracking_confidence=RECOMMENDED_DEFAULTS["tracking_confidence"],
-        detection_scale=RECOMMENDED_DEFAULTS["detection_scale"],
-        draw_pinch_ratio=RECOMMENDED_DEFAULTS["draw_pinch_ratio"],
-        clear_pinch_ratio=RECOMMENDED_DEFAULTS["clear_pinch_ratio"],
-        smoothing_window=RECOMMENDED_DEFAULTS["smoothing_window"],
-        thickness=RECOMMENDED_DEFAULTS["thickness"],
-        current_color_key=RECOMMENDED_DEFAULTS["current_color_key"],
-        show_skeleton=RECOMMENDED_DEFAULTS["show_skeleton"],
-        show_debug=RECOMMENDED_DEFAULTS["show_debug"],
-        palette={k: list(v) for k, v in RECOMMENDED_DEFAULTS["palette"].items()},
-    )
 
 
 # --------------------------------------------------------------------------- #
@@ -207,7 +315,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "save_and_close": "Сохранить и закрыть",
         "cancel": "Отмена",
         "reset_recommended": "Сбросить до рекомендуемых",
-        "reset_confirm": "Вы уверены, что хотите сбросить все настройки до рекомендуемых (пороги 17, FPS 30)?",
+        "reset_confirm": "Сбросить все настройки до рекомендуемых (пороги 17, FPS 30)? Язык интерфейса не изменится.",
         "tab_general": "Основные",
         "tab_camera": "Камера и FPS",
         "tab_gestures": "Жесты и пороги",
@@ -227,7 +335,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "tracking_conf_label": "Порог отслеживания (tracking):",
         "draw_pinch_label": "Порог пинча DRAW_PINCH_RATIO (рекомендуется 17):",
         "clear_pinch_label": "Порог пинча CLEAR_PINCH_RATIO (рекомендуется 17):",
-        "smoothing_label": "Окно сглаживания координат (кадры):",
+        "smoothing_cutoff_label": "Сглаживание: частота среза (меньше = плавнее):",
+        "smoothing_beta_label": "Сглаживание: отклик на быстрые движения (beta):",
         "show_skeleton_label": "Отображать скелет руки и точки",
         "show_debug_label": "Отображать отладочные значения на экране",
         "palette_description": "Настройте цвет для каждой цифры (0-9). Нажатие цифры переключает цвет кисти:",
@@ -258,6 +367,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "status_clear": "ОЧИСТКА",
         "status_idle": "ОЖИДАНИЕ",
         "status_saved": "Рисунок сохранён: {filename}",
+        "status_save_failed": "Не удалось сохранить рисунок: {filename}",
         "status_cleared": "Холст очищен",
         "thickness_label": "Толщина: {val}",
         "current_color_label": "Цвет: {key}",
@@ -266,6 +376,12 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "recommended_suffix": "(Рекомендуется)",
         "fps_unlimited": "Без ограничений",
         "pick_color_title": "Выбор цвета для клавиши {key}",
+        "res_hd": "HD",
+        "res_fhd": "Full HD",
+        "bar_proc": "{brand} ({cores} яд.)",
+        "bar_load": "Загрузка CPU: {load}%",
+        "bar_fps": "FPS: {fps}{target}",
+        "camera_error": "Камера {index} не найдена или занята. Выберите другую в настройках (O).",
     },
     "kk": {
         "app_title": "Air Draw — Қол қимылдарымен сурет салу",
@@ -273,7 +389,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "save_and_close": "Сақтау және жабу",
         "cancel": "Болдырмау",
         "reset_recommended": "Ұсынылғанға қайтару",
-        "reset_confirm": "Барлық баптауларды ұсынылған мәндерге қайтарғыңыз келе ме (шегі 17, FPS 30)?",
+        "reset_confirm": "Барлық баптауларды ұсынылған мәндерге қайтарғыңыз келе ме (шегі 17, FPS 30)? Интерфейс тілі өзгермейді.",
         "tab_general": "Жалпы",
         "tab_camera": "Камера және FPS",
         "tab_gestures": "Қимылдар мен шектер",
@@ -293,7 +409,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "tracking_conf_label": "Қадағалау сенімділігі (tracking):",
         "draw_pinch_label": "Сурет салу пинч шегі DRAW_PINCH_RATIO (ұсынылғаны 17):",
         "clear_pinch_label": "Тазалау пинч шегі CLEAR_PINCH_RATIO (ұсынылғаны 17):",
-        "smoothing_label": "Координаттарды тегістеу терезесі (кадр):",
+        "smoothing_cutoff_label": "Тегістеу: кесу жиілігі (кіші = жұмсағыр):",
+        "smoothing_beta_label": "Тегістеу: жылдам қимылға жауап (beta):",
         "show_skeleton_label": "Қол қаңқасы мен нүктелерін көрсету",
         "show_debug_label": "Экранда реттеу мәндерін көрсету",
         "palette_description": "Әрбір санға (0-9) түс орнатыңыз. Санды басу қылқалам түсін ауыстырады:",
@@ -324,6 +441,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "status_clear": "ТАЗАЛАУ",
         "status_idle": "КҮТУ",
         "status_saved": "Сурет сақталды: {filename}",
+        "status_save_failed": "Суретті сақтау мүмкін болмады: {filename}",
         "status_cleared": "Кенеп тазаланды",
         "thickness_label": "Қалыңдық: {val}",
         "current_color_label": "Түс: {key}",
@@ -332,6 +450,12 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "recommended_suffix": "(Ұсынылады)",
         "fps_unlimited": "Шектеусіз",
         "pick_color_title": "{key} пернесі үшін түс таңдау",
+        "res_hd": "HD",
+        "res_fhd": "Full HD",
+        "bar_proc": "{brand} ({cores} ядро)",
+        "bar_load": "CPU жүктемесі: {load}%",
+        "bar_fps": "FPS: {fps}{target}",
+        "camera_error": "{index}-камера табылмады немесе бос емес. Баптаулардан (O) басқасын таңдаңыз.",
     },
     "en": {
         "app_title": "Air Draw — Hand Gestures Air Canvas",
@@ -339,7 +463,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "save_and_close": "Save & Close",
         "cancel": "Cancel",
         "reset_recommended": "Reset to Recommended",
-        "reset_confirm": "Are you sure you want to reset all settings to recommended defaults (pinch 17, FPS 30)?",
+        "reset_confirm": "Reset all settings to recommended defaults (pinch 17, FPS 30)? The interface language will not change.",
         "tab_general": "General",
         "tab_camera": "Camera & FPS",
         "tab_gestures": "Gestures & Thresholds",
@@ -359,7 +483,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "tracking_conf_label": "Tracking Confidence:",
         "draw_pinch_label": "Draw Pinch Ratio (DRAW_PINCH_RATIO, rec. 17):",
         "clear_pinch_label": "Clear Pinch Ratio (CLEAR_PINCH_RATIO, rec. 17):",
-        "smoothing_label": "Coordinate Smoothing Window (frames):",
+        "smoothing_cutoff_label": "Smoothing cutoff (lower = smoother):",
+        "smoothing_beta_label": "Smoothing responsiveness (beta):",
         "show_skeleton_label": "Render hand skeleton and landmarks",
         "show_debug_label": "Show debug distances and thresholds overlay",
         "palette_description": "Set a custom color for each digit key (0-9). Pressing the digit selects the brush color:",
@@ -390,6 +515,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "status_clear": "CLEARING",
         "status_idle": "IDLE",
         "status_saved": "Drawing saved: {filename}",
+        "status_save_failed": "Could not save drawing: {filename}",
         "status_cleared": "Canvas cleared",
         "thickness_label": "Thickness: {val}",
         "current_color_label": "Color: {key}",
@@ -398,6 +524,12 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "recommended_suffix": "(Recommended)",
         "fps_unlimited": "Unlimited",
         "pick_color_title": "Choose color for key {key}",
+        "res_hd": "HD",
+        "res_fhd": "Full HD",
+        "bar_proc": "{brand} ({cores} cores)",
+        "bar_load": "CPU load: {load}%",
+        "bar_fps": "FPS: {fps}{target}",
+        "camera_error": "Camera {index} not found or busy. Pick another one in Settings (O).",
     },
 }
 

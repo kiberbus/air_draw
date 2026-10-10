@@ -1,0 +1,3 @@
+# Tools for tests and linting (not needed to run or build the app)
+pytest==8.4.2
+ruff==0.14.2
